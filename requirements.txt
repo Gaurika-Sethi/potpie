@@ -34,6 +34,7 @@ langchain-core==1.0.4
 langgraph-checkpoint==3.0.1
 langgraph-sdk==0.2.9
 langchain-postgres==0.0.16
+langchain-neo4j==0.0.3
 langgraph==1.0.3
 firebase-admin==6.6.0
 gitPython==3.1.43
@@ -82,3 +83,5 @@ openinference-instrumentation-litellm==0.1.28
 openinference-instrumentation-openai==0.1.40
 openinference-instrumentation-pydantic-ai==0.1.9
 anthropic==0.72.0
+mem0ai==1.1.0
+qdrant-client==1.12.0
