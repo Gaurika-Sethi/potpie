@@ -69,6 +69,7 @@ class SSOLoginResponse(BaseModel):
     email: str
     display_name: Optional[str] = None
     access_token: Optional[str] = None
+    firebase_token: Optional[str] = None  # Firebase custom token for frontend auth
     message: str
     linking_token: Optional[str] = None  # If needs_linking
     existing_providers: Optional[List[str]] = None  # If needs_linking

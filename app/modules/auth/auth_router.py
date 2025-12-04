@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from datetime import datetime
 
@@ -7,8 +8,11 @@ from dotenv import load_dotenv
 from fastapi import Depends, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.exceptions import HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from app.core.database import get_db
 from app.modules.auth.auth_schema import (
@@ -20,6 +24,7 @@ from app.modules.auth.auth_schema import (
     UserAuthProvidersResponse,
     AuthProviderResponse,
     AccountResponse,
+    AuthProviderCreate,
 )
 from app.modules.auth.auth_service import auth_handler
 from app.modules.auth.unified_auth_service import UnifiedAuthService
@@ -62,54 +67,266 @@ class AuthAPI:
 
     @auth_router.post("/signup")
     async def signup(request: Request, db: Session = Depends(get_db)):
-        body = json.loads(await request.body())
-        uid = body["uid"]
-        oauth_token = body["accessToken"]
-        user_service = UserService(db)
-        user = user_service.get_user_by_uid(uid)
-        if user:
-            message, error = user_service.update_last_login(uid, oauth_token)
-            if error:
-                return Response(content=message, status_code=400)
-            else:
+        try:
+            body = json.loads(await request.body())
+            uid = body.get("uid")
+            if not uid:
+                return Response(content=json.dumps({"error": "uid is required"}), status_code=400)
+            
+            email = body.get("email")
+            if not email:
+                return Response(content=json.dumps({"error": "email is required"}), status_code=400)
+            
+            # These fields are optional (only present for GitHub OAuth signup)
+            oauth_token = body.get("accessToken", "")
+            provider_data = body.get("providerData", [])
+            provider_username = body.get("providerUsername", "")
+            
+            user_service = UserService(db)
+            user = user_service.get_user_by_uid(uid)
+            
+            # Also check by email in case user exists with different UID (e.g., SSO signup)
+            user_by_email = user_service.get_user_by_email(email)
+            
+            # If user exists by email but not by UID, we need to link accounts
+            if user_by_email and user_by_email.uid != uid:
+                logger.info(f"Email {email} exists with different UID. Linking accounts: {user_by_email.uid} -> {uid}")
+                existing_uid = user_by_email.uid
+                
+                # Update the existing user's UID to match the new Firebase UID
+                # This links the SSO account with the email/password account
+                try:
+                    # Update user UID in database
+                    user_by_email.uid = uid
+                    db.commit()
+                    logger.info(f"Updated user UID from {existing_uid} to {uid} for email {email}")
+                    
+                    # Add email/password provider to the unified auth system
+                    unified_auth = UnifiedAuthService(db)
+                    provider_create = AuthProviderCreate(
+                        provider_type="firebase_email",
+                        provider_uid=uid,
+                        provider_data={"email": email, "uid": uid},
+                        access_token=None,
+                        is_primary=False,  # Keep SSO as primary if it exists
+                    )
+                    unified_auth.add_provider(uid, provider_create)
+                    logger.info(f"Added firebase_email provider for user {uid}")
+                    
+                    return Response(
+                        content=json.dumps({"uid": uid, "exists": True, "linked": True}),
+                        status_code=200,
+                    )
+                except Exception as e:
+                    logger.error(f"Error linking accounts: {str(e)}")
+                    import traceback
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+                    db.rollback()
+                    return Response(
+                        content=json.dumps({"error": f"Failed to link accounts: {str(e)}"}),
+                        status_code=400,
+                    )
+            
+            if user:
+                # Existing user - DO NOT update email if it's different (preserve primary sign-in email)
+                # When GitHub is linked, Firebase might send GitHub email, but we keep the original email
+                if email and email.lower() != user.email.lower():
+                    logger.info(f"Email mismatch: GitHub email {email} vs existing user email {user.email}. Keeping existing email {user.email}.")
+                    # Don't update the email - keep the primary sign-in email
+                
+                # Existing user - update last login
+                if oauth_token:
+                    message, error = user_service.update_last_login(uid, oauth_token)
+                    if error:
+                        return Response(content=message, status_code=400)
+                
+                # Also add GitHub as a provider in the new system if it's a GitHub signup
+                if oauth_token and provider_data and len(provider_data) > 0:
+                    try:
+                        unified_auth = UnifiedAuthService(db)
+                        provider_info = provider_data[0] if isinstance(provider_data, list) else provider_data
+                        
+                        # Check if GitHub provider already exists
+                        existing_github = unified_auth.get_provider(uid, "firebase_github")
+                        if not existing_github:
+                            # Add GitHub as a provider
+                            provider_create = AuthProviderCreate(
+                                provider_type="firebase_github",
+                                provider_uid=provider_username or uid,
+                                provider_data=provider_info,
+                                access_token=oauth_token,
+                            )
+                            unified_auth.add_provider(uid, provider_create)
+                            logger.info(f"Linked GitHub provider to existing user {uid}")
+                    except Exception as e:
+                        logger.warning(f"Failed to add GitHub provider for existing user: {str(e)}")
+                        # Continue - the old system still works
+                
+                # Also add email/password provider if it doesn't exist
+                if not oauth_token:
+                    try:
+                        unified_auth = UnifiedAuthService(db)
+                        existing_email_provider = unified_auth.get_provider(uid, "firebase_email")
+                        if not existing_email_provider:
+                            provider_create = AuthProviderCreate(
+                                provider_type="firebase_email",
+                                provider_uid=uid,
+                                provider_data={"email": email, "uid": uid},
+                                access_token=None,
+                                is_primary=False,
+                            )
+                            unified_auth.add_provider(uid, provider_create)
+                            logger.info(f"Added firebase_email provider for existing user {uid}")
+                    except Exception as e:
+                        logger.warning(f"Failed to add email provider for existing user: {str(e)}")
+                
                 return Response(
                     content=json.dumps({"uid": uid, "exists": True}),
                     status_code=200,
                 )
-        else:
-            first_login = datetime.utcnow()
-            provider_info = body["providerData"][0]
-            provider_info["access_token"] = oauth_token
-            user = CreateUser(
-                uid=uid,
-                email=body["email"],
-                display_name=body["displayName"],
-                email_verified=body["emailVerified"],
-                created_at=first_login,
-                last_login_at=first_login,
-                provider_info=provider_info,
-                provider_username=body["providerUsername"],
-            )
-            uid, message, error = user_service.create_user(user)
+            else:
+                # Check if email already exists (from SSO signup) - need to link accounts
+                if user_by_email:
+                    logger.warning(f"Email {email} already exists with UID {user_by_email.uid}, but new signup has UID {uid}. This should have been caught earlier.")
+                    # This shouldn't happen if the above check worked, but handle it anyway
+                    return Response(
+                        content=json.dumps({"error": "Email already registered. Please sign in instead."}),
+                        status_code=400,
+                    )
+                
+                # New user - create user
+                first_login = datetime.utcnow()
+                
+                # Handle provider info for both GitHub OAuth and email/password
+                if provider_data and len(provider_data) > 0:
+                    provider_info = provider_data[0] if isinstance(provider_data, list) else provider_data
+                    if oauth_token:
+                        provider_info["access_token"] = oauth_token
+                else:
+                    # Email/password signup - create minimal provider info
+                    provider_info = {
+                        "providerId": "password",
+                        "uid": uid,
+                        "email": email,
+                    }
+                
+                # For new users, use the email from the request
+                # But if this is a GitHub signup and user exists by email, use existing email
+                user_email = email
+                if oauth_token and provider_data and len(provider_data) > 0:
+                    # This is a GitHub signup - check if user exists by email
+                    existing_user_by_email = user_service.get_user_by_email(email)
+                    if existing_user_by_email:
+                        # User exists - use their existing email (primary sign-in email)
+                        user_email = existing_user_by_email.email
+                        logger.info(f"GitHub signup for existing email {email}. Using existing user email: {user_email}")
+                
+                user = CreateUser(
+                    uid=uid,
+                    email=user_email,  # Use existing email if user already exists
+                    display_name=body.get("displayName", user_email.split("@")[0]),
+                    email_verified=body.get("emailVerified", False),
+                    created_at=first_login,
+                    last_login_at=first_login,
+                    provider_info=provider_info,
+                    provider_username=provider_username,
+                )
+                uid, message, error = user_service.create_user(user)
+                
+                # Check if user creation failed due to duplicate email
+                if error and "duplicate" in message.lower() or "already exists" in message.lower():
+                    # Email already exists - try to link accounts
+                    user_by_email = user_service.get_user_by_email(email)
+                    if user_by_email:
+                        logger.info(f"User creation failed due to duplicate email. Linking {uid} to existing user {user_by_email.uid}")
+                        # Update existing user's UID to match new Firebase UID
+                        try:
+                            user_by_email.uid = uid
+                            db.commit()
+                            
+                            # Add email/password provider
+                            unified_auth = UnifiedAuthService(db)
+                            provider_create = AuthProviderCreate(
+                                provider_type="firebase_email",
+                                provider_uid=uid,
+                                provider_data={"email": email, "uid": uid},
+                                access_token=None,
+                                is_primary=False,
+                            )
+                            unified_auth.add_provider(uid, provider_create)
+                            
+                            return Response(
+                                content=json.dumps({"uid": uid, "exists": True, "linked": True}),
+                                status_code=200,
+                            )
+                        except Exception as e:
+                            logger.error(f"Error linking accounts after duplicate email error: {str(e)}")
+                            db.rollback()
 
-            await send_slack_message(
-                f"New signup: {body['email']} ({body['displayName']})"
-            )
+                # Also add provider in the new system
+                try:
+                    unified_auth = UnifiedAuthService(db)
+                    
+                    # Determine provider type
+                    if oauth_token and provider_data and len(provider_data) > 0:
+                        # GitHub OAuth signup
+                        provider_type = "firebase_github"
+                        provider_info_data = provider_data[0] if isinstance(provider_data, list) else provider_data
+                        provider_uid = provider_username or uid
+                    else:
+                        # Email/password signup - use firebase_email provider type
+                        provider_type = "firebase_email"
+                        provider_info_data = {"email": email, "uid": uid}
+                        provider_uid = uid
+                    
+                    provider_create = AuthProviderCreate(
+                        provider_type=provider_type,
+                        provider_uid=provider_uid,
+                        provider_data=provider_info_data,
+                        access_token=oauth_token if oauth_token else None,
+                        is_primary=True,  # First provider is primary
+                    )
+                    unified_auth.add_provider(uid, provider_create)
+                    logger.info(f"Added {provider_type} provider for new user {uid}")
+                except Exception as e:
+                    logger.warning(f"Failed to add provider for new user: {str(e)}")
+                    import traceback
+                    logger.warning(f"Traceback: {traceback.format_exc()}")
+                    # Continue - the old system still works
 
-            PostHogClient().send_event(
-                uid,
-                "signup_event",
-                {
-                    "email": body["email"],
-                    "display_name": body["displayName"],
-                    "github_username": body["providerUsername"],
-                },
-            )
-            if error:
-                return Response(content=message, status_code=400)
+                await send_slack_message(
+                    f"New signup: {email} ({body.get('displayName', 'N/A')})"
+                )
+
+                PostHogClient().send_event(
+                    uid,
+                    "signup_event",
+                    {
+                        "email": email,
+                        "display_name": body.get("displayName", ""),
+                        "github_username": provider_username,
+                    },
+                )
+                
+                if error:
+                    return Response(content=message, status_code=400)
+                return Response(
+                    content=json.dumps({"uid": uid, "exists": False}),
+                    status_code=200,
+                )
+        except KeyError as e:
+            logger.error(f"Missing required field in signup request: {str(e)}")
             return Response(
-                content=json.dumps({"uid": uid, "exists": False}),
-                status_code=201,
+                content=json.dumps({"error": f"Missing required field: {str(e)}"}),
+                status_code=400,
+            )
+        except Exception as e:
+            logger.error(f"Error in signup endpoint: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return Response(
+                content=json.dumps({"error": f"Signup failed: {str(e)}"}),
+                status_code=500,
             )
     
     # ===== Multi-Provider SSO Endpoints =====
@@ -145,6 +362,9 @@ class AuthAPI:
             
             # Extract provider data from token (mock for now)
             provider_data = sso_request.provider_data or {}
+            # Ensure email is in provider_data for later retrieval
+            if 'email' not in provider_data:
+                provider_data['email'] = sso_request.email
             provider_uid = provider_data.get("sub") or provider_data.get("oid") or sso_request.email
             
             # Authenticate or create user
@@ -152,12 +372,75 @@ class AuthAPI:
                 email=sso_request.email,
                 provider_type=provider_type,
                 provider_uid=provider_uid,
-                provider_data=provider_data,
+                provider_data=provider_data,  # This includes the email for later retrieval
                 display_name=provider_data.get("name") or sso_request.email.split("@")[0],
                 email_verified=True,  # SSO providers always verify email
                 ip_address=ip_address,
                 user_agent=user_agent,
             )
+            
+            # Create Firebase custom token for frontend authentication
+            # This allows the frontend to create a Firebase session
+            # Skip in development mode where Firebase might not be initialized
+            if os.getenv("isDevelopmentMode") == "enabled":
+                logger.info("Development mode enabled - skipping Firebase custom token creation")
+            else:
+                try:
+                    import firebase_admin
+                    from firebase_admin import auth as firebase_auth
+                    
+                    # Check if Firebase is initialized
+                    try:
+                        firebase_app = firebase_admin.get_app()
+                        logger.info("Firebase Admin is initialized")
+                    except ValueError:
+                        logger.error("Firebase Admin not initialized. Cannot create custom token.")
+                        logger.error("Make sure Firebase is initialized in app startup")
+                        raise Exception("Firebase Admin not initialized")
+                    
+                    # Create or get Firebase user
+                    try:
+                        firebase_user = firebase_auth.get_user_by_email(user.email)
+                        # Update UID if it doesn't match
+                        if firebase_user.uid != user.uid:
+                            logger.warning(f"Firebase UID mismatch: {firebase_user.uid} != {user.uid}")
+                            # Use the Firebase UID for token creation
+                            token_uid = firebase_user.uid
+                        else:
+                            token_uid = user.uid
+                    except firebase_auth.UserNotFoundError:
+                        # Create Firebase user if it doesn't exist
+                        try:
+                            firebase_user = firebase_auth.create_user(
+                                uid=user.uid,
+                                email=user.email,
+                                display_name=user.display_name,
+                                email_verified=True,
+                            )
+                            token_uid = user.uid
+                            logger.info(f"Created Firebase user {user.uid} for email {user.email}")
+                        except firebase_auth.UidAlreadyExistsError:
+                            # User exists with different email, get by UID
+                            firebase_user = firebase_auth.get_user(user.uid)
+                            token_uid = user.uid
+                    
+                    # Generate custom token (returns bytes)
+                    custom_token = firebase_auth.create_custom_token(token_uid)
+                    # Decode bytes to string
+                    response.firebase_token = custom_token.decode('utf-8')
+                    logger.info(f"Created Firebase custom token for user {token_uid} (email: {user.email})")
+                except ImportError as e:
+                    logger.error(f"Firebase Admin not available: {str(e)}")
+                    logger.error("Cannot create custom token - Firebase Admin SDK not installed")
+                except ValueError as e:
+                    logger.error(f"Firebase Admin not initialized: {str(e)}")
+                    logger.error("Cannot create custom token - Firebase not initialized")
+                except Exception as firebase_error:
+                    logger.error(f"Failed to create Firebase custom token: {str(firebase_error)}")
+                    logger.error(f"Error type: {type(firebase_error).__name__}")
+                    import traceback
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+                    # Continue without Firebase token - frontend can handle this
             
             # Send Slack notification for new users
             if response.status == "new_user":
@@ -174,8 +457,11 @@ class AuthAPI:
                     },
                 )
             
+            # Include all fields including None values
+            response_dict = response.model_dump(exclude_none=False)
+            logger.info(f"SSO login response: status={response.status}, has_firebase_token={response.firebase_token is not None}")
             return JSONResponse(
-                content=response.model_dump(),
+                content=response_dict,
                 status_code=200 if response.status == "success" else 202,
             )
             
@@ -196,32 +482,65 @@ class AuthAPI:
         Called after user confirms they want to link the provider
         when 'needs_linking' status is returned from login.
         """
+        logger.info("=== CONFIRM PROVIDER LINKING REQUEST ===")
+        logger.info(f"Request received: linking_token={confirm_request.linking_token}")
+        
         try:
+            if not confirm_request.linking_token:
+                logger.error("Missing linking_token in request")
+                return JSONResponse(
+                    content={"error": "linking_token is required"},
+                    status_code=400,
+                )
+            
+            logger.info(f"Calling unified_auth.confirm_provider_link with token: {confirm_request.linking_token}")
             unified_auth = UnifiedAuthService(db)
             
             new_provider = unified_auth.confirm_provider_link(
                 confirm_request.linking_token
             )
             
+            logger.info(f"confirm_provider_link returned: {new_provider}")
+            
             if not new_provider:
+                logger.warning(f"Invalid or expired linking token: {confirm_request.linking_token}")
                 return JSONResponse(
-                    content={"error": "Invalid or expired linking token"},
+                    content={"error": "Invalid or expired linking token. Please try signing in again."},
                     status_code=400,
                 )
+            
+            logger.info(f"Successfully linked provider. Provider ID: {new_provider.id}, Type: {new_provider.provider_type}")
+            
+            provider_response = AuthProviderResponse.model_validate(new_provider).model_dump(mode='json')
+            logger.info(f"Provider response: {provider_response}")
             
             return JSONResponse(
                 content={
                     "message": "Provider linked successfully",
-                    "provider": AuthProviderResponse.from_orm(new_provider).model_dump(),
+                    "provider": provider_response,
                 },
                 status_code=200,
             )
             
+        except ValueError as e:
+            logger.error(f"ValueError in confirm_provider_linking: {str(e)}")
+            import traceback
+            logger.error(f"ValueError Traceback: {traceback.format_exc()}")
+            return JSONResponse(
+                content={"error": f"Invalid request: {str(e)}"},
+                status_code=400,
+            )
         except Exception as e:
+            logger.error(f"Exception in confirm_provider_linking: {str(e)}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"Full Traceback: {traceback.format_exc()}")
             return JSONResponse(
                 content={"error": f"Failed to link provider: {str(e)}"},
                 status_code=400,
             )
+        finally:
+            logger.info("=== END CONFIRM PROVIDER LINKING REQUEST ===")
     
     @auth_router.delete("/providers/cancel-linking/{linking_token}")
     async def cancel_provider_linking(
@@ -254,6 +573,7 @@ class AuthAPI:
     async def get_my_providers(
         request: Request,
         db: Session = Depends(get_db),
+        credential: HTTPAuthorizationCredentials = Depends(HTTPBearer(auto_error=False)),
     ):
         """
         Get all authentication providers for the current user.
@@ -262,7 +582,8 @@ class AuthAPI:
         """
         try:
             # Get user from auth token
-            user_data = await auth_handler.check_auth(request, None)
+            response = Response()
+            user_data = await auth_handler.check_auth(request, response, credential)
             user_id = user_data.get("user_id")
             
             if not user_id:
@@ -280,12 +601,12 @@ class AuthAPI:
             )
             
             response = UserAuthProvidersResponse(
-                providers=[AuthProviderResponse.from_orm(p) for p in providers],
-                primary_provider=AuthProviderResponse.from_orm(primary_provider) if primary_provider else None,
+                providers=[AuthProviderResponse.model_validate(p) for p in providers],
+                primary_provider=AuthProviderResponse.model_validate(primary_provider) if primary_provider else None,
             )
             
             return JSONResponse(
-                content=response.model_dump(),
+                content=response.model_dump(mode='json'),
                 status_code=200,
             )
             
@@ -300,11 +621,13 @@ class AuthAPI:
         request: Request,
         primary_request: SetPrimaryProviderRequest,
         db: Session = Depends(get_db),
+        credential: HTTPAuthorizationCredentials = Depends(HTTPBearer(auto_error=False)),
     ):
         """Set a provider as the primary login method"""
         try:
             # Get user from auth token
-            user_data = await auth_handler.check_auth(request, None)
+            response = Response()
+            user_data = await auth_handler.check_auth(request, response, credential)
             user_id = user_data.get("user_id")
             
             if not user_id:
@@ -341,11 +664,13 @@ class AuthAPI:
         request: Request,
         unlink_request: UnlinkProviderRequest,
         db: Session = Depends(get_db),
+        credential: HTTPAuthorizationCredentials = Depends(HTTPBearer(auto_error=False)),
     ):
         """Unlink a provider from account"""
         try:
             # Get user from auth token
-            user_data = await auth_handler.check_auth(request, None)
+            response = Response()
+            user_data = await auth_handler.check_auth(request, response, credential)
             user_id = user_data.get("user_id")
             
             if not user_id:
@@ -386,15 +711,57 @@ class AuthAPI:
                 status_code=400,
             )
     
+    @auth_router.get("/account/check-email")
+    async def check_email_providers(
+            email: str,
+            db: Session = Depends(get_db),
+    ):
+        """
+        Check if an email exists and what providers it has.
+        Used to help users who might have signed up with SSO.
+        """
+        try:
+            user_service = UserService(db)
+            user = user_service.get_user_by_email(email)
+            
+            if not user:
+                return JSONResponse(
+                    content={"exists": False, "has_sso": False},
+                    status_code=200,
+                )
+            
+            unified_auth = UnifiedAuthService(db)
+            providers = unified_auth.get_user_providers(user.uid)
+            
+            # Check if user has SSO providers
+            has_sso = any(p.provider_type.startswith('sso_') for p in providers)
+            
+            return JSONResponse(
+                content={
+                    "exists": True,
+                    "has_sso": has_sso,
+                    "providers": [p.provider_type for p in providers],
+                },
+                status_code=200,
+            )
+        except Exception as e:
+            logger.error(f"Error checking email providers: {str(e)}")
+            return JSONResponse(
+                content={"error": "Failed to check email"},
+                status_code=500,
+            )
+    
     @auth_router.get("/account/me")
     async def get_my_account(
-        request: Request,
-        db: Session = Depends(get_db),
+            request: Request,
+            db: Session = Depends(get_db),
+            credential: HTTPAuthorizationCredentials = Depends(HTTPBearer(auto_error=False)),
     ):
         """Get complete account information including all providers"""
         try:
             # Get user from auth token
-            user_data = await auth_handler.check_auth(request, None)
+            response = Response()
+            user_data = await auth_handler.check_auth(request, response, credential)
             user_id = user_data.get("user_id")
             
             if not user_id:
@@ -420,20 +787,52 @@ class AuthAPI:
                 None
             )
             
+            # Determine the correct email to return
+            # Priority: 1) SSO provider email, 2) Email/password provider email, 3) Database email (avoid GitHub email if possible)
+            display_email = user.email  # Default to database email
+            
+            # First, try to find SSO provider (work email)
+            sso_provider = next((p for p in providers if p.provider_type.startswith('sso_')), None)
+            if sso_provider and sso_provider.provider_data:
+                provider_email = sso_provider.provider_data.get('email')
+                if provider_email:
+                    display_email = provider_email
+                    logger.info(f"Account API: Found SSO provider {sso_provider.provider_type}, using email: {display_email}")
+            
+            # If no SSO provider, try email/password provider
+            if display_email == user.email:  # Still using database email
+                email_provider = next((p for p in providers if p.provider_type == 'firebase_email'), None)
+                if email_provider and email_provider.provider_data:
+                    provider_email = email_provider.provider_data.get('email')
+                    if provider_email:
+                        display_email = provider_email
+                        logger.info(f"Account API: Found email/password provider, using email: {display_email}")
+            
+            # If still using database email and it's a GitHub email (gmail.com), log a warning
+            if display_email == user.email and '@gmail.com' in user.email.lower():
+                logger.warning(f"Account API: Using database email which appears to be GitHub email: {display_email}")
+                logger.warning(f"Account API: User has providers: {[p.provider_type for p in providers]}")
+                logger.warning(f"Account API: Consider checking if user signed up with SSO first - SSO provider may be missing")
+            
+            # Log the email being returned to help debug
+            logger.info(f"Account API: User {user.uid} has {len(providers)} providers: {[p.provider_type for p in providers]}")
+            logger.info(f"Account API: Database email: {user.email}, Display email: {display_email}, Primary provider: {primary_provider}")
+            
             response = AccountResponse(
                 user_id=user.uid,
-                email=user.email,
+                email=display_email,  # Use the determined display email
                 display_name=user.display_name,
                 organization=user.organization,
                 organization_name=user.organization_name,
                 email_verified=user.email_verified,
                 created_at=user.created_at,
-                providers=[AuthProviderResponse.from_orm(p) for p in providers],
+                providers=[AuthProviderResponse.model_validate(p).model_dump(mode='json') for p in providers],
                 primary_provider=primary_provider,
             )
             
+            logger.info(f"Account API: Final response email: {response.email}")
             return JSONResponse(
-                content=response.model_dump(),
+                content=response.model_dump(mode='json'),
                 status_code=200,
             )
             

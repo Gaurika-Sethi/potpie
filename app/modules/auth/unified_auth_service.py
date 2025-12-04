@@ -7,7 +7,7 @@ while maintaining single user identity based on email.
 
 import logging
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
@@ -384,7 +384,7 @@ class UnifiedAuthService:
     ) -> str:
         """Create a pending provider link (expires in 15 minutes)"""
         token = secrets.token_urlsafe(32)
-        expires_at = datetime.utcnow() + timedelta(minutes=15)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
         
         pending_link = PendingProviderLink(
             user_id=user_id,
@@ -409,6 +409,9 @@ class UnifiedAuthService:
         
         Returns the newly linked provider or None if token invalid/expired.
         """
+        logger.info(f"=== confirm_provider_link called ===")
+        logger.info(f"Linking token: {linking_token}")
+        
         pending = (
             self.db.query(PendingProviderLink)
             .filter(PendingProviderLink.token == linking_token)
@@ -417,38 +420,84 @@ class UnifiedAuthService:
         
         if not pending:
             logger.warning(f"Invalid linking token: {linking_token}")
+            logger.info("Querying all pending links to debug:")
+            all_pending = self.db.query(PendingProviderLink).all()
+            logger.info(f"Total pending links in DB: {len(all_pending)}")
+            for p in all_pending:
+                logger.info(f"  - Token: {p.token}, User: {p.user_id}, Provider: {p.provider_type}, Expires: {p.expires_at}")
             return None
         
-        # Check expiration
-        if pending.expires_at < datetime.utcnow():
-            logger.warning(f"Expired linking token: {linking_token}")
+        logger.info(f"Found pending link: user_id={pending.user_id}, provider_type={pending.provider_type}, expires_at={pending.expires_at}")
+        
+        # Check expiration - ensure both datetimes are timezone-aware
+        now = datetime.now(timezone.utc)
+        expires_at = pending.expires_at
+        # If expires_at is naive, make it timezone-aware (assume UTC)
+        if expires_at is not None and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        # If expires_at is timezone-aware, ensure now is also timezone-aware
+        elif expires_at is not None and expires_at.tzinfo is not None:
+            # Both are timezone-aware, comparison should work
+            pass
+        logger.info(f"Current time (UTC): {now}, Expires at: {expires_at}, expires_at.tzinfo: {expires_at.tzinfo if expires_at else None}")
+        if expires_at and expires_at < now:
+            logger.warning(f"Expired linking token: {linking_token} (expired at {expires_at}, now is {now})")
             self.db.delete(pending)
             self.db.commit()
             return None
         
-        # Create the provider
-        provider_create = AuthProviderCreate(
-            provider_type=pending.provider_type,
-            provider_uid=pending.provider_uid,
-            provider_data=pending.provider_data,
-        )
+        logger.info(f"Token is valid, checking if provider already exists...")
+        # Check if provider already exists (might have been added via signup endpoint)
+        existing_provider = self.get_provider(pending.user_id, pending.provider_type)
+        if existing_provider:
+            logger.info(
+                f"Provider {pending.provider_type} already exists for user {pending.user_id}. "
+                f"Provider ID: {existing_provider.id}. Deleting pending link."
+            )
+            self.db.delete(pending)
+            self.db.commit()
+            return existing_provider
         
-        new_provider = self.add_provider(
-            user_id=pending.user_id,
-            provider_create=provider_create,
-            ip_address=pending.ip_address,
-            user_agent=pending.user_agent,
-        )
-        
-        # Delete the pending link
-        self.db.delete(pending)
-        self.db.commit()
-        
-        logger.info(
-            f"Confirmed provider link for user {pending.user_id}, "
-            f"provider {pending.provider_type}"
-        )
-        return new_provider
+        logger.info(f"Provider doesn't exist, creating new provider...")
+        try:
+            # Create the provider
+            provider_create = AuthProviderCreate(
+                provider_type=pending.provider_type,
+                provider_uid=pending.provider_uid,
+                provider_data=pending.provider_data,
+            )
+            logger.info(f"Created AuthProviderCreate: type={provider_create.provider_type}, uid={provider_create.provider_uid}")
+            
+            logger.info(f"Calling add_provider for user {pending.user_id}...")
+            new_provider = self.add_provider(
+                user_id=pending.user_id,
+                provider_create=provider_create,
+                ip_address=pending.ip_address,
+                user_agent=pending.user_agent,
+            )
+            logger.info(f"add_provider returned: id={new_provider.id}, type={new_provider.provider_type}")
+            
+            # Delete the pending link
+            logger.info("Deleting pending link...")
+            self.db.delete(pending)
+            self.db.commit()
+            logger.info("Pending link deleted and changes committed")
+            
+            logger.info(
+                f"Confirmed provider link for user {pending.user_id}, "
+                f"provider {pending.provider_type}"
+            )
+            return new_provider
+        except Exception as e:
+            logger.error(f"Error confirming provider link: {str(e)}")
+            logger.error(f"Error type: {type(e).__name__}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            self.db.rollback()
+            logger.error("Rolled back transaction")
+            raise
+        finally:
+            logger.info("=== END confirm_provider_link ===")
     
     def cancel_pending_link(self, linking_token: str) -> bool:
         """Cancel a pending provider link"""
