@@ -99,17 +99,18 @@ class MainApp:
             "http://127.0.0.1:3000",
             "http://127.0.0.1:3001",
         ]
-        
+
         # Add production origins if set
         frontend_url = os.getenv("NEXT_PUBLIC_BASE_URL") or os.getenv("FRONTEND_URL")
         if frontend_url:
             # Extract base URL without path
             from urllib.parse import urlparse
+
             parsed = urlparse(frontend_url)
             base_url = f"{parsed.scheme}://{parsed.netloc}"
             if base_url not in origins:
                 origins.append(base_url)
-        
+
         # Always use specific origins with credentials for proper CORS support
         logging.info(f"CORS configured with origins: {origins}")
         self.app.add_middleware(

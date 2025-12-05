@@ -22,33 +22,33 @@ logger = logging.getLogger(__name__)
 class AzureSSOProvider(BaseSSOProvider):
     """
     Azure AD / Microsoft Entra ID SSO Provider.
-    
+
     Supports:
     - Azure AD work accounts
     - Microsoft 365 accounts
     - ID token verification
     - OAuth 2.0 / OpenID Connect flow
     """
-    
+
     AZURE_AUTH_URL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize"
     AZURE_TOKEN_URL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
     AZURE_JWKS_URL = "https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys"
-    
+
     @property
     def provider_name(self) -> str:
         return "azure"
-    
+
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         """
         Initialize Azure AD SSO provider.
-        
+
         Configuration:
             - client_id: Azure AD Application (client) ID
             - client_secret: Azure AD Client Secret
             - tenant_id: Azure AD Tenant ID (or 'common' for multi-tenant)
         """
         super().__init__(config)
-        
+
         # Load from config or environment
         self.client_id = self.config.get("client_id") or os.getenv(
             "AZURE_SSO_CLIENT_ID"
@@ -60,11 +60,11 @@ class AzureSSOProvider(BaseSSOProvider):
             "AZURE_SSO_TENANT_ID",
             "common",
         )
-    
+
     async def verify_token(self, id_token_str: str) -> SSOUserInfo:
         """
         Verify an Azure AD ID token.
-        
+
         Verifies:
         - Token signature using Azure's JWKS
         - Token expiration
@@ -77,21 +77,21 @@ class AzureSSOProvider(BaseSSOProvider):
             jwks_response = requests.get(jwks_url, timeout=10)
             jwks_response.raise_for_status()
             jwks = jwks_response.json()
-            
+
             # Decode token header to get key ID
             unverified_header = jwt.get_unverified_header(id_token_str)
             kid = unverified_header.get("kid")
-            
+
             # Find the matching key
             signing_key = None
             for key in jwks.get("keys", []):
                 if key.get("kid") == kid:
                     signing_key = jwt.PyJWK(key)
                     break
-            
+
             if not signing_key:
                 raise ValueError("Unable to find matching signing key")
-            
+
             # Verify and decode token
             payload = jwt.decode(
                 id_token_str,
@@ -104,13 +104,13 @@ class AzureSSOProvider(BaseSSOProvider):
                     "verify_aud": True,
                 },
             )
-            
+
             # Verify issuer
             expected_issuer = f"https://login.microsoftonline.com/{self.tenant_id}/v2.0"
             if payload.get("iss") != expected_issuer and self.tenant_id != "common":
                 # For 'common' tenant, issuer will vary by actual tenant
                 logger.warning(f"Unexpected issuer: {payload.get('iss')}")
-            
+
             # Extract user info
             user_info = SSOUserInfo(
                 email=payload.get("email") or payload.get("preferred_username"),
@@ -121,10 +121,10 @@ class AzureSSOProvider(BaseSSOProvider):
                 family_name=payload.get("family_name"),
                 raw_data=payload,
             )
-            
+
             logger.info(f"Successfully verified Azure AD token for {user_info.email}")
             return user_info
-            
+
         except jwt.ExpiredSignatureError:
             logger.error("Azure AD token has expired")
             raise ValueError("Token has expired")
@@ -137,7 +137,7 @@ class AzureSSOProvider(BaseSSOProvider):
         except Exception as e:
             logger.error(f"Unexpected error verifying Azure AD token: {str(e)}")
             raise ValueError(f"Failed to verify Azure AD token: {str(e)}")
-    
+
     def get_authorization_url(
         self,
         redirect_uri: str,
@@ -146,7 +146,7 @@ class AzureSSOProvider(BaseSSOProvider):
     ) -> str:
         """
         Generate Azure AD OAuth authorization URL.
-        
+
         Default scopes:
         - openid
         - email
@@ -154,9 +154,9 @@ class AzureSSOProvider(BaseSSOProvider):
         """
         if not scopes:
             scopes = ["openid", "email", "profile"]
-        
+
         auth_url = self.AZURE_AUTH_URL.format(tenant=self.tenant_id)
-        
+
         params = {
             "client_id": self.client_id,
             "redirect_uri": redirect_uri,
@@ -164,23 +164,22 @@ class AzureSSOProvider(BaseSSOProvider):
             "response_mode": "query",
             "scope": " ".join(scopes),
         }
-        
+
         if state:
             params["state"] = state
-        
+
         return f"{auth_url}?{urlencode(params)}"
-    
+
     def get_required_config_keys(self) -> list:
         """Azure requires client_id and tenant_id"""
         return ["client_id", "tenant_id"]
-    
+
     def validate_config(self) -> bool:
         """Validate Azure configuration"""
         if not self.client_id:
             raise ValueError("Azure SSO requires client_id")
-        
+
         if not self.tenant_id:
             raise ValueError("Azure SSO requires tenant_id")
-        
-        return True
 
+        return True

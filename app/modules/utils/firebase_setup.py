@@ -45,7 +45,9 @@ class FirebaseSetup:
             # Check if Firebase is already initialized
             try:
                 firebase_admin.get_app()
-                logging.info("Firebase Admin already initialized, skipping re-initialization")
+                logging.info(
+                    "Firebase Admin already initialized, skipping re-initialization"
+                )
             except ValueError:
                 # Initialize the Firebase app with the credentials.
                 firebase_admin.initialize_app(cred)
