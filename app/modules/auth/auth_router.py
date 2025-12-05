@@ -155,9 +155,26 @@ class AuthAPI:
                                 provider_uid=provider_username or uid,
                                 provider_data=provider_info,
                                 access_token=oauth_token,
+                                is_primary=False,  # Don't make it primary automatically for existing users
                             )
                             unified_auth.add_provider(uid, provider_create)
                             logger.info(f"Linked GitHub provider to existing user {uid}")
+                        else:
+                            # User already has GitHub provider
+                            # Check if user has other providers - if yes, this is likely a link operation, not a sign-in
+                            # Only set GitHub as primary if it's the only provider (user signed up with GitHub)
+                            all_providers = unified_auth.get_user_providers(uid)
+                            has_other_providers = any(p.provider_type != "firebase_github" for p in all_providers)
+                            
+                            if not existing_github.is_primary and not has_other_providers:
+                                # User only has GitHub - this is a GitHub sign-in, set as primary
+                                logger.info(f"User {uid} signed in with GitHub (only provider) - setting GitHub as primary provider")
+                                unified_auth.set_primary_provider(uid, "firebase_github")
+                            elif not existing_github.is_primary and has_other_providers:
+                                # User has other providers - this is a link operation, don't change primary
+                                logger.info(f"User {uid} linking GitHub (has other providers) - keeping existing primary provider")
+                            # Update last used
+                            unified_auth.update_last_used(uid, "firebase_github")
                     except Exception as e:
                         logger.warning(f"Failed to add GitHub provider for existing user: {str(e)}")
                         # Continue - the old system still works
@@ -482,9 +499,6 @@ class AuthAPI:
         Called after user confirms they want to link the provider
         when 'needs_linking' status is returned from login.
         """
-        logger.info("=== CONFIRM PROVIDER LINKING REQUEST ===")
-        logger.info(f"Request received: linking_token={confirm_request.linking_token}")
-        
         try:
             if not confirm_request.linking_token:
                 logger.error("Missing linking_token in request")
@@ -493,26 +507,21 @@ class AuthAPI:
                     status_code=400,
                 )
             
-            logger.info(f"Calling unified_auth.confirm_provider_link with token: {confirm_request.linking_token}")
             unified_auth = UnifiedAuthService(db)
-            
             new_provider = unified_auth.confirm_provider_link(
                 confirm_request.linking_token
             )
             
-            logger.info(f"confirm_provider_link returned: {new_provider}")
-            
             if not new_provider:
-                logger.warning(f"Invalid or expired linking token: {confirm_request.linking_token}")
+                logger.warning(f"Invalid or expired linking token")
                 return JSONResponse(
                     content={"error": "Invalid or expired linking token. Please try signing in again."},
                     status_code=400,
                 )
             
-            logger.info(f"Successfully linked provider. Provider ID: {new_provider.id}, Type: {new_provider.provider_type}")
+            logger.info(f"Successfully linked provider {new_provider.provider_type} for user {new_provider.user_id}")
             
             provider_response = AuthProviderResponse.model_validate(new_provider).model_dump(mode='json')
-            logger.info(f"Provider response: {provider_response}")
             
             return JSONResponse(
                 content={
@@ -524,23 +533,16 @@ class AuthAPI:
             
         except ValueError as e:
             logger.error(f"ValueError in confirm_provider_linking: {str(e)}")
-            import traceback
-            logger.error(f"ValueError Traceback: {traceback.format_exc()}")
             return JSONResponse(
                 content={"error": f"Invalid request: {str(e)}"},
                 status_code=400,
             )
         except Exception as e:
-            logger.error(f"Exception in confirm_provider_linking: {str(e)}")
-            logger.error(f"Exception type: {type(e).__name__}")
-            import traceback
-            logger.error(f"Full Traceback: {traceback.format_exc()}")
+            logger.error(f"Exception in confirm_provider_linking: {str(e)}", exc_info=True)
             return JSONResponse(
                 content={"error": f"Failed to link provider: {str(e)}"},
                 status_code=400,
             )
-        finally:
-            logger.info("=== END CONFIRM PROVIDER LINKING REQUEST ===")
     
     @auth_router.delete("/providers/cancel-linking/{linking_token}")
     async def cancel_provider_linking(
@@ -782,41 +784,50 @@ class AuthAPI:
             unified_auth = UnifiedAuthService(db)
             providers = unified_auth.get_user_providers(user_id)
             
-            primary_provider = next(
-                (p.provider_type for p in providers if p.is_primary),
+            primary_provider_obj = next(
+                (p for p in providers if p.is_primary),
                 None
             )
+            primary_provider = primary_provider_obj.provider_type if primary_provider_obj else None
             
-            # Determine the correct email to return
-            # Priority: 1) SSO provider email, 2) Email/password provider email, 3) Database email (avoid GitHub email if possible)
+            # Determine the correct email to return based on primary provider
+            # Logic:
+            # 1. If primary provider is GitHub → show GitHub email
+            # 2. If primary provider is SSO (Google) → show SSO email
+            # 3. If primary provider is email/password → show email/password email
+            # 4. Otherwise → use database email
             display_email = user.email  # Default to database email
             
-            # First, try to find SSO provider (work email)
-            sso_provider = next((p for p in providers if p.provider_type.startswith('sso_')), None)
-            if sso_provider and sso_provider.provider_data:
-                provider_email = sso_provider.provider_data.get('email')
-                if provider_email:
-                    display_email = provider_email
-                    logger.info(f"Account API: Found SSO provider {sso_provider.provider_type}, using email: {display_email}")
-            
-            # If no SSO provider, try email/password provider
-            if display_email == user.email:  # Still using database email
-                email_provider = next((p for p in providers if p.provider_type == 'firebase_email'), None)
-                if email_provider and email_provider.provider_data:
-                    provider_email = email_provider.provider_data.get('email')
+            if primary_provider_obj:
+                # Get email from primary provider's data
+                if primary_provider_obj.provider_data:
+                    provider_email = primary_provider_obj.provider_data.get('email')
                     if provider_email:
                         display_email = provider_email
-                        logger.info(f"Account API: Found email/password provider, using email: {display_email}")
-            
-            # If still using database email and it's a GitHub email (gmail.com), log a warning
-            if display_email == user.email and '@gmail.com' in user.email.lower():
-                logger.warning(f"Account API: Using database email which appears to be GitHub email: {display_email}")
-                logger.warning(f"Account API: User has providers: {[p.provider_type for p in providers]}")
-                logger.warning(f"Account API: Consider checking if user signed up with SSO first - SSO provider may be missing")
-            
-            # Log the email being returned to help debug
-            logger.info(f"Account API: User {user.uid} has {len(providers)} providers: {[p.provider_type for p in providers]}")
-            logger.info(f"Account API: Database email: {user.email}, Display email: {display_email}, Primary provider: {primary_provider}")
+            else:
+                # No primary provider - try to find best email
+                # Priority: SSO > Email/Password > GitHub > Database
+                sso_provider = next((p for p in providers if p.provider_type.startswith('sso_')), None)
+                if sso_provider and sso_provider.provider_data:
+                    provider_email = sso_provider.provider_data.get('email')
+                    if provider_email:
+                        display_email = provider_email
+                
+                # If no SSO, try email/password provider
+                if display_email == user.email:
+                    email_provider = next((p for p in providers if p.provider_type == 'firebase_email'), None)
+                    if email_provider and email_provider.provider_data:
+                        provider_email = email_provider.provider_data.get('email')
+                        if provider_email:
+                            display_email = provider_email
+                
+                # If still database email, try GitHub provider (last resort)
+                if display_email == user.email:
+                    github_provider = next((p for p in providers if p.provider_type == 'firebase_github'), None)
+                    if github_provider and github_provider.provider_data:
+                        provider_email = github_provider.provider_data.get('email') or github_provider.provider_data.get('login')
+                        if provider_email:
+                            display_email = provider_email
             
             response = AccountResponse(
                 user_id=user.uid,
@@ -830,7 +841,6 @@ class AuthAPI:
                 primary_provider=primary_provider,
             )
             
-            logger.info(f"Account API: Final response email: {response.email}")
             return JSONResponse(
                 content=response.model_dump(mode='json'),
                 status_code=200,

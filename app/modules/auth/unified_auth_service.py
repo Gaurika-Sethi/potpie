@@ -286,6 +286,12 @@ class UnifiedAuthService:
                 # Scenario 1: User exists with this provider → Login
                 self.update_last_used(existing_user.uid, provider_type)
                 
+                # Set this provider as primary since user is signing in with it
+                # This ensures the correct email is shown in the sidebar
+                if not existing_provider.is_primary:
+                    logger.info(f"Setting {provider_type} as primary provider for user {existing_user.uid} (user signed in with this provider)")
+                    self.set_primary_provider(existing_user.uid, provider_type)
+                
                 # Update last login
                 existing_user.last_login_at = datetime.utcnow()
                 self.db.commit()
@@ -409,9 +415,6 @@ class UnifiedAuthService:
         
         Returns the newly linked provider or None if token invalid/expired.
         """
-        logger.info(f"=== confirm_provider_link called ===")
-        logger.info(f"Linking token: {linking_token}")
-        
         pending = (
             self.db.query(PendingProviderLink)
             .filter(PendingProviderLink.token == linking_token)
@@ -420,14 +423,7 @@ class UnifiedAuthService:
         
         if not pending:
             logger.warning(f"Invalid linking token: {linking_token}")
-            logger.info("Querying all pending links to debug:")
-            all_pending = self.db.query(PendingProviderLink).all()
-            logger.info(f"Total pending links in DB: {len(all_pending)}")
-            for p in all_pending:
-                logger.info(f"  - Token: {p.token}, User: {p.user_id}, Provider: {p.provider_type}, Expires: {p.expires_at}")
             return None
-        
-        logger.info(f"Found pending link: user_id={pending.user_id}, provider_type={pending.provider_type}, expires_at={pending.expires_at}")
         
         # Check expiration - ensure both datetimes are timezone-aware
         now = datetime.now(timezone.utc)
@@ -460,28 +456,31 @@ class UnifiedAuthService:
         
         logger.info(f"Provider doesn't exist, creating new provider...")
         try:
+            # Check if user already has providers (to determine if this should be primary)
+            existing_providers = self.get_user_providers(pending.user_id)
+            has_existing_providers = len(existing_providers) > 0
+            
+            # When linking a provider, don't make it primary if user already has providers
+            # This preserves the original sign-in method's email in the sidebar
+            is_primary = not has_existing_providers  # Only primary if it's the first provider
+            
             # Create the provider
             provider_create = AuthProviderCreate(
                 provider_type=pending.provider_type,
                 provider_uid=pending.provider_uid,
                 provider_data=pending.provider_data,
+                is_primary=is_primary,  # Explicitly set based on whether user has existing providers
             )
-            logger.info(f"Created AuthProviderCreate: type={provider_create.provider_type}, uid={provider_create.provider_uid}")
-            
-            logger.info(f"Calling add_provider for user {pending.user_id}...")
             new_provider = self.add_provider(
                 user_id=pending.user_id,
                 provider_create=provider_create,
                 ip_address=pending.ip_address,
                 user_agent=pending.user_agent,
             )
-            logger.info(f"add_provider returned: id={new_provider.id}, type={new_provider.provider_type}")
             
             # Delete the pending link
-            logger.info("Deleting pending link...")
             self.db.delete(pending)
             self.db.commit()
-            logger.info("Pending link deleted and changes committed")
             
             logger.info(
                 f"Confirmed provider link for user {pending.user_id}, "
@@ -489,15 +488,9 @@ class UnifiedAuthService:
             )
             return new_provider
         except Exception as e:
-            logger.error(f"Error confirming provider link: {str(e)}")
-            logger.error(f"Error type: {type(e).__name__}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            logger.error(f"Error confirming provider link: {str(e)}", exc_info=True)
             self.db.rollback()
-            logger.error("Rolled back transaction")
             raise
-        finally:
-            logger.info("=== END confirm_provider_link ===")
     
     def cancel_pending_link(self, linking_token: str) -> bool:
         """Cancel a pending provider link"""
