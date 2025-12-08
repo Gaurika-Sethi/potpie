@@ -532,22 +532,11 @@ class UnifiedAuthService:
         user_agent: Optional[str],
     ) -> User:
         """Create a new user with their first auth provider"""
-        # Extract organization from email
-        email_domain = email.split("@")[1] if "@" in email else None
-        organization = None
-
-        if email_domain:
-            personal_domains = {
-                "gmail.com",
-                "yahoo.com",
-                "hotmail.com",
-                "outlook.com",
-                "icloud.com",
-                "protonmail.com",
-            }
-            if email_domain not in personal_domains:
-                organization = email_domain
-
+        # Extract organization from email using utility function
+        from app.modules.utils.email_helper import extract_organization_from_email
+        
+        organization = extract_organization_from_email(email)
+        
         # Create user
         new_user = User(
             uid=provider_uid,  # Use provider UID as user ID initially
