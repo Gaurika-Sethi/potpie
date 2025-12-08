@@ -534,9 +534,9 @@ class UnifiedAuthService:
         """Create a new user with their first auth provider"""
         # Extract organization from email using utility function
         from app.modules.utils.email_helper import extract_organization_from_email
-        
+
         organization = extract_organization_from_email(email)
-        
+
         # Create user
         new_user = User(
             uid=provider_uid,  # Use provider UID as user ID initially
