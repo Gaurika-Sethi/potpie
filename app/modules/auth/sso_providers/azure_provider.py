@@ -86,11 +86,15 @@ class AzureSSOProvider(BaseSSOProvider):
             signing_key = None
             for key in jwks.get("keys", []):
                 if key.get("kid") == kid:
-                    signing_key = jwt.PyJWK(key)
-                    break
+                    try:
+                        signing_key = jwt.PyJWK(key)
+                        break
+                    except Exception as e:
+                        logger.warning(f"Failed to create PyJWK from key: {str(e)}")
+                        continue
 
             if not signing_key:
-                raise ValueError("Unable to find matching signing key")
+                raise ValueError(f"Unable to find matching signing key for kid: {kid}")
 
             # Verify and decode token
             payload = jwt.decode(

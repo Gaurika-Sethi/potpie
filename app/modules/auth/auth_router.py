@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 from dotenv import load_dotenv
@@ -261,7 +261,7 @@ class AuthAPI:
                     )
 
                 # New user - create user
-                first_login = datetime.utcnow()
+                first_login = datetime.now(timezone.utc)
 
                 # Handle provider info for both GitHub OAuth and email/password
                 if provider_data and len(provider_data) > 0:
@@ -444,30 +444,73 @@ class AuthAPI:
             # Map SSO provider to our provider type
             provider_type = f"sso_{sso_request.sso_provider}"
 
-            # TODO: Verify the ID token with the SSO provider
-            # For now, we trust the frontend validation
-            # In production, verify token server-side
+            # Verify the ID token with the SSO provider
+            provider = unified_auth.get_sso_provider(sso_request.sso_provider)
+            if not provider:
+                logger.error(f"Unsupported SSO provider: {sso_request.sso_provider}")
+                return JSONResponse(
+                    content={"error": f"Unsupported SSO provider: {sso_request.sso_provider}"},
+                    status_code=400,
+                )
 
-            # Extract provider data from token (mock for now)
-            provider_data = sso_request.provider_data or {}
-            # Ensure email is in provider_data for later retrieval
-            if "email" not in provider_data:
-                provider_data["email"] = sso_request.email
-            provider_uid = (
-                provider_data.get("sub")
-                or provider_data.get("oid")
-                or sso_request.email
-            )
+            # Verify token and extract user info
+            try:
+                user_info = await unified_auth.verify_sso_token(
+                    sso_request.sso_provider, sso_request.id_token
+                )
+                if not user_info:
+                    logger.error(f"Token verification failed for {sso_request.sso_provider}")
+                    return JSONResponse(
+                        content={"error": "Invalid or expired ID token"},
+                        status_code=401,
+                    )
 
-            # Authenticate or create user
+                # Use verified user info from token
+                verified_email = user_info.email
+                provider_uid = user_info.provider_uid
+                display_name = user_info.display_name or verified_email.split("@")[0]
+                email_verified = user_info.email_verified
+
+                # Security: Verify that the email in the request matches the verified token email
+                if sso_request.email.lower() != verified_email.lower():
+                    logger.warning(
+                        f"Email mismatch: request email {sso_request.email} does not match "
+                        f"verified token email {verified_email}"
+                    )
+                    return JSONResponse(
+                        content={
+                            "error": "Email in request does not match verified token email"
+                        },
+                        status_code=400,
+                    )
+
+                # Build provider_data from verified token
+                provider_data = sso_request.provider_data or {}
+                provider_data["email"] = verified_email
+                if user_info.raw_data:
+                    provider_data.update(user_info.raw_data)
+
+            except ValueError as e:
+                logger.error(f"Token verification error: {str(e)}")
+                return JSONResponse(
+                    content={"error": f"Token verification failed: {str(e)}"},
+                    status_code=401,
+                )
+            except Exception as e:
+                logger.error(f"Unexpected error verifying token: {str(e)}", exc_info=True)
+                return JSONResponse(
+                    content={"error": "Token verification failed"},
+                    status_code=500,
+                )
+
+            # Authenticate or create user using verified email from token
             user, response = unified_auth.authenticate_or_create(
-                email=sso_request.email,
+                email=verified_email,
                 provider_type=provider_type,
                 provider_uid=provider_uid,
                 provider_data=provider_data,  # This includes the email for later retrieval
-                display_name=provider_data.get("name")
-                or sso_request.email.split("@")[0],
-                email_verified=True,  # SSO providers always verify email
+                display_name=display_name,
+                email_verified=email_verified,
                 ip_address=ip_address,
                 user_agent=user_agent,
             )
@@ -555,14 +598,14 @@ class AuthAPI:
             # Send Slack notification for new users
             if response.status == "new_user":
                 await send_slack_message(
-                    f"New SSO signup: {sso_request.email} via {sso_request.sso_provider}"
+                    f"New SSO signup: {verified_email} via {sso_request.sso_provider}"
                 )
 
                 PostHogClient().send_event(
                     user.uid,
                     "sso_signup_event",
                     {
-                        "email": sso_request.email,
+                        "email": verified_email,
                         "sso_provider": sso_request.sso_provider,
                     },
                 )

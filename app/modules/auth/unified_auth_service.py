@@ -12,6 +12,11 @@ from typing import Optional, Dict, Any, List, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 
+# Use timezone-aware datetime.now() instead of deprecated utcnow()
+def utc_now() -> datetime:
+    """Get current UTC time as timezone-aware datetime"""
+    return datetime.now(timezone.utc)
+
 from app.modules.auth.sso_providers import (
     GoogleSSOProvider,
     AzureSSOProvider,
@@ -141,8 +146,8 @@ class UnifiedAuthService:
             refresh_token=provider_create.refresh_token,
             token_expires_at=provider_create.token_expires_at,
             is_primary=is_first or provider_create.is_primary,
-            linked_at=datetime.utcnow(),
-            last_used_at=datetime.utcnow(),
+            linked_at=utc_now(),
+            last_used_at=utc_now(),
             linked_by_ip=ip_address,
             linked_by_user_agent=user_agent,
         )
@@ -243,7 +248,7 @@ class UnifiedAuthService:
         """Update last_used_at for a provider"""
         provider = self.get_provider(user_id, provider_type)
         if provider:
-            provider.last_used_at = datetime.utcnow()
+            provider.last_used_at = utc_now()
             self.db.commit()
 
     # ===== Authentication Flow =====
@@ -292,7 +297,7 @@ class UnifiedAuthService:
                     self.set_primary_provider(existing_user.uid, provider_type)
 
                 # Update last login
-                existing_user.last_login_at = datetime.utcnow()
+                existing_user.last_login_at = utc_now()
                 self.db.commit()
 
                 # Audit log
@@ -544,8 +549,8 @@ class UnifiedAuthService:
             display_name=display_name or email.split("@")[0],
             email_verified=email_verified,
             organization=organization,
-            created_at=datetime.utcnow(),
-            last_login_at=datetime.utcnow(),
+            created_at=utc_now(),
+            last_login_at=utc_now(),
         )
 
         self.db.add(new_user)
@@ -559,8 +564,8 @@ class UnifiedAuthService:
             provider_data=provider_data,
             access_token=access_token,
             is_primary=True,  # First provider is always primary
-            linked_at=datetime.utcnow(),
-            last_used_at=datetime.utcnow(),
+            linked_at=utc_now(),
+            last_used_at=utc_now(),
             linked_by_ip=ip_address,
             linked_by_user_agent=user_agent,
         )
