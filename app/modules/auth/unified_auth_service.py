@@ -298,7 +298,8 @@ class UnifiedAuthService:
                 # This ensures the correct email is shown in the sidebar
                 if not existing_provider.is_primary:
                     logger.info(
-                        f"Setting {provider_type} as primary provider for user {existing_user.uid} (user signed in with this provider)"
+                        f"Setting {provider_type} as primary provider for user "
+                        f"{existing_user.uid} (user signed in with this provider)"
                     )
                     self.set_primary_provider(existing_user.uid, provider_type)
 
@@ -348,12 +349,13 @@ class UnifiedAuthService:
                     user_agent=user_agent,
                 )
 
+                providers_str = ", ".join(existing_providers)
                 return existing_user, SSOLoginResponse(
                     status="needs_linking",
                     user_id=existing_user.uid,
                     email=email,
                     display_name=existing_user.display_name,
-                    message=f"Account exists with {', '.join(existing_providers)}. Link this provider?",
+                    message=f"Account exists with {providers_str}. Link this provider?",
                     linking_token=linking_token,
                     existing_providers=existing_providers,
                 )
@@ -452,7 +454,8 @@ class UnifiedAuthService:
             # Both are timezone-aware, comparison should work
             pass
         logger.info(
-            f"Current time (UTC): {now}, Expires at: {expires_at}, expires_at.tzinfo: {expires_at.tzinfo if expires_at else None}"
+            f"Current time (UTC): {now}, Expires at: {expires_at}, "
+            f"expires_at.tzinfo: {expires_at.tzinfo if expires_at else None}"
         )
         if expires_at and expires_at < now:
             logger.warning(

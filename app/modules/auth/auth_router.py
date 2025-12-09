@@ -611,7 +611,8 @@ class AuthAPI:
             # Include all fields including None values
             response_dict = response.model_dump(exclude_none=False)
             logger.info(
-                f"SSO login response: status={response.status}, has_firebase_token={response.firebase_token is not None}"
+                f"SSO login response: status={response.status}, "
+                f"has_firebase_token={response.firebase_token is not None}"
             )
             return JSONResponse(
                 content=response_dict,
@@ -652,13 +653,17 @@ class AuthAPI:
                 logger.warning("Invalid or expired linking token")
                 return JSONResponse(
                     content={
-                        "error": "Invalid or expired linking token. Please try signing in again."
+                        "error": (
+                            "Invalid or expired linking token. "
+                            "Please try signing in again."
+                        )
                     },
                     status_code=400,
                 )
 
             logger.info(
-                f"Successfully linked provider {new_provider.provider_type} for user {new_provider.user_id}"
+                f"Successfully linked provider {new_provider.provider_type} "
+                f"for user {new_provider.user_id}"
             )
 
             provider_response = AuthProviderResponse.model_validate(
