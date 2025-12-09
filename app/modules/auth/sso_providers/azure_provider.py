@@ -6,6 +6,7 @@ Handles Microsoft 365 and Azure AD authentication.
 
 import os
 import logging
+import ssl
 import jwt
 import httpx
 from typing import Dict, Any, Optional
@@ -74,7 +75,9 @@ class AzureSSOProvider(BaseSSOProvider):
         try:
             # Get signing keys from Azure
             jwks_url = self.AZURE_JWKS_URL.format(tenant=self.tenant_id)
-            async with httpx.AsyncClient() as client:
+            # Use secure TLS defaults (Python 3.10+ uses secure defaults)
+            ssl_context = ssl.create_default_context()
+            async with httpx.AsyncClient(verify=ssl_context) as client:
                 try:
                     jwks_response = await client.get(jwks_url, timeout=10.0)
                     jwks_response.raise_for_status()

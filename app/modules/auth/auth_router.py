@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import ssl
 import traceback
 from datetime import datetime, timezone
 
@@ -43,7 +44,9 @@ load_dotenv(override=True)
 async def send_slack_message(message: str):
     payload = {"text": message}
     if SLACK_WEBHOOK_URL:
-        async with httpx.AsyncClient() as client:
+        # Use secure TLS defaults (Python 3.10+ uses secure defaults)
+        ssl_context = ssl.create_default_context()
+        async with httpx.AsyncClient(verify=ssl_context) as client:
             try:
                 await client.post(SLACK_WEBHOOK_URL, json=payload, timeout=10.0)
             except Exception as e:
