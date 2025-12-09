@@ -438,6 +438,7 @@ class AuthAPI:
 
     @auth_router.post("/sso/login")
     async def sso_login(
+        self,
         request: Request,
         sso_request: SSOLoginRequest,
         db: Session = Depends(get_db),
