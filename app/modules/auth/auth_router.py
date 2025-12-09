@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import traceback
 from datetime import datetime, timezone
 
 import requests
@@ -129,8 +130,6 @@ class AuthAPI:
                     )
                 except Exception as e:
                     logger.error(f"Error linking accounts: {str(e)}")
-                    import traceback
-
                     logger.error(f"Traceback: {traceback.format_exc()}")
                     db.rollback()
                     return Response(
@@ -306,9 +305,8 @@ class AuthAPI:
                 uid, message, error = user_service.create_user(user)
 
                 # Check if user creation failed due to duplicate email
-                if (
-                    error
-                    and "duplicate" in message.lower()
+                if error and (
+                    "duplicate" in message.lower()
                     or "already exists" in message.lower()
                 ):
                     # Email already exists - try to link accounts
@@ -376,8 +374,6 @@ class AuthAPI:
                     logger.info(f"Added {provider_type} provider for new user {uid}")
                 except Exception as e:
                     logger.warning(f"Failed to add provider for new user: {str(e)}")
-                    import traceback
-
                     logger.warning(f"Traceback: {traceback.format_exc()}")
                     # Continue - the old system still works
 
@@ -409,8 +405,6 @@ class AuthAPI:
             )
         except Exception as e:
             logger.error(f"Error in signup endpoint: {str(e)}")
-            import traceback
-
             logger.error(f"Traceback: {traceback.format_exc()}")
             return Response(
                 content=json.dumps({"error": f"Signup failed: {str(e)}"}),
@@ -596,8 +590,6 @@ class AuthAPI:
                         f"Failed to create Firebase custom token: {str(firebase_error)}"
                     )
                     logger.error(f"Error type: {type(firebase_error).__name__}")
-                    import traceback
-
                     logger.error(f"Traceback: {traceback.format_exc()}")
                     # Continue without Firebase token - frontend can handle this
 

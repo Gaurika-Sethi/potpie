@@ -12,6 +12,9 @@ from typing import Optional, Dict, Any, List, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 
+# Constants
+LINKING_TOKEN_LENGTH = 32  # Length of URL-safe token for provider linking
+LINKING_TOKEN_EXPIRY_MINUTES = 15  # Expiration time for pending provider links
 
 # Use timezone-aware datetime.now() instead of deprecated utcnow()
 def utc_now() -> datetime:
@@ -397,8 +400,10 @@ class UnifiedAuthService:
         user_agent: Optional[str] = None,
     ) -> str:
         """Create a pending provider link (expires in 15 minutes)"""
-        token = secrets.token_urlsafe(32)
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+        token = secrets.token_urlsafe(LINKING_TOKEN_LENGTH)
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            minutes=LINKING_TOKEN_EXPIRY_MINUTES
+        )
 
         pending_link = PendingProviderLink(
             user_id=user_id,
