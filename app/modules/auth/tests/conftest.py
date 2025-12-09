@@ -17,6 +17,9 @@ from app.modules.auth.auth_provider_model import (
     AuthAuditLog,
 )
 
+# Test constants
+TEST_EMAIL = "test@example.com"
+
 
 @pytest.fixture(scope="function")
 def db_session():
@@ -47,7 +50,7 @@ def test_user(db_session):
     """Create a test user"""
     user = User(
         uid="test-user-123",
-        email="test@example.com",
+        email=TEST_EMAIL,
         display_name="Test User",
         email_verified=True,
         created_at=datetime.now(timezone.utc),
@@ -84,7 +87,7 @@ def test_user_with_multiple_providers(db_session, test_user_with_github):
         user_id=test_user_with_github.uid,
         provider_type="sso_google",
         provider_uid="google-456",
-        provider_data={"email": "test@example.com"},
+        provider_data={"email": TEST_EMAIL},
         is_primary=False,
         linked_at=datetime.now(timezone.utc),
         last_used_at=datetime.now(timezone.utc),
@@ -101,7 +104,7 @@ def pending_link(db_session, test_user):
         user_id=test_user.uid,
         provider_type="sso_google",
         provider_uid="google-789",
-        provider_data={"email": "test@example.com"},
+        provider_data={"email": TEST_EMAIL},
         token="test-linking-token-123",
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
         ip_address="127.0.0.1",
