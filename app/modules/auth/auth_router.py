@@ -288,9 +288,7 @@ class AuthAPI:
                 status_code=401,
             )
         except Exception as e:
-            logger.error(
-                f"Unexpected error verifying token: {str(e)}", exc_info=True
-            )
+            logger.error(f"Unexpected error verifying token: {str(e)}", exc_info=True)
             return None, JSONResponse(
                 content={"error": "Token verification failed"},
                 status_code=500,
@@ -324,9 +322,7 @@ class AuthAPI:
             try:
                 firebase_user = firebase_auth.get_user_by_email(user.email)
                 token_uid = (
-                    firebase_user.uid
-                    if firebase_user.uid != user.uid
-                    else user.uid
+                    firebase_user.uid if firebase_user.uid != user.uid else user.uid
                 )
                 if firebase_user.uid != user.uid:
                     logger.warning(
@@ -741,14 +737,15 @@ class AuthAPI:
 
             # Verify token and extract user info
             provider_data = sso_request.provider_data or {}
-            user_info_dict, error_response = (
-                await AuthAPI._verify_sso_token_and_extract_info(
-                    unified_auth,
-                    sso_request.sso_provider,
-                    sso_request.id_token,
-                    sso_request.email,
-                    provider_data,
-                )
+            (
+                user_info_dict,
+                error_response,
+            ) = await AuthAPI._verify_sso_token_and_extract_info(
+                unified_auth,
+                sso_request.sso_provider,
+                sso_request.id_token,
+                sso_request.email,
+                provider_data,
             )
             if error_response:
                 return error_response
