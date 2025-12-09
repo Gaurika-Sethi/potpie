@@ -98,7 +98,11 @@ class AuthAPI:
 
     @staticmethod
     def _handle_existing_user_github(
-        db: Session, uid: str, oauth_token: str, provider_data: list, provider_username: str
+        db: Session,
+        uid: str,
+        oauth_token: str,
+        provider_data: list,
+        provider_username: str,
     ) -> None:
         """Handle GitHub provider for existing user."""
         try:
@@ -241,7 +245,9 @@ class AuthAPI:
             if oauth_token and provider_data and len(provider_data) > 0:
                 provider_type = "firebase_github"
                 provider_info_data = (
-                    provider_data[0] if isinstance(provider_data, list) else provider_data
+                    provider_data[0]
+                    if isinstance(provider_data, list)
+                    else provider_data
                 )
                 provider_uid = provider_username or uid
             else:
