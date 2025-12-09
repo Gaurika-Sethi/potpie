@@ -718,6 +718,7 @@ class AuthAPI:
 
     @auth_router.delete("/providers/cancel-linking/{linking_token}")
     async def cancel_provider_linking(
+        self,
         linking_token: str,
         db: Session = Depends(get_db),
     ):
