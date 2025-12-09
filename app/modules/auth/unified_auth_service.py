@@ -16,6 +16,7 @@ from sqlalchemy import and_
 LINKING_TOKEN_LENGTH = 32  # Length of URL-safe token for provider linking
 LINKING_TOKEN_EXPIRY_MINUTES = 15  # Expiration time for pending provider links
 
+
 # Use timezone-aware datetime.now() instead of deprecated utcnow()
 def utc_now() -> datetime:
     """Get current UTC time as timezone-aware datetime"""
