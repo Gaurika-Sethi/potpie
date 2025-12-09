@@ -81,7 +81,9 @@ class AzureSSOProvider(BaseSSOProvider):
                     jwks = jwks_response.json()
                 except httpx.HTTPError as e:
                     logger.error(f"Failed to fetch Azure JWKS: {str(e)}")
-                    raise ValueError(f"Failed to fetch signing keys from Azure: {str(e)}")
+                    raise ValueError(
+                        f"Failed to fetch signing keys from Azure: {str(e)}"
+                    )
 
                 # Decode token header to get key ID
                 unverified_header = jwt.get_unverified_header(id_token_str)
@@ -99,7 +101,9 @@ class AzureSSOProvider(BaseSSOProvider):
                             continue
 
                 if not signing_key:
-                    raise ValueError(f"Unable to find matching signing key for kid: {kid}")
+                    raise ValueError(
+                        f"Unable to find matching signing key for kid: {kid}"
+                    )
 
                 # Verify and decode token
                 payload = jwt.decode(
