@@ -13,6 +13,7 @@ from fastapi.exceptions import HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from sqlalchemy.orm import Session
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,213 @@ async def send_slack_message(message: str):
 
 
 class AuthAPI:
+    @staticmethod
+    async def _link_accounts_by_email(
+        db: Session, user_by_email, uid: str, email: str
+    ) -> Response:
+        """Link accounts when user exists by email but not by UID."""
+        logger.info(
+            f"Email {email} exists with different UID. Linking accounts: {user_by_email.uid} -> {uid}"
+        )
+        existing_uid = user_by_email.uid
+
+        try:
+            user_by_email.uid = uid
+            db.commit()
+            logger.info(
+                f"Updated user UID from {existing_uid} to {uid} for email {email}"
+            )
+
+            unified_auth = UnifiedAuthService(db)
+            provider_create = AuthProviderCreate(
+                provider_type="firebase_email",
+                provider_uid=uid,
+                provider_data={"email": email, "uid": uid},
+                access_token=None,
+                is_primary=False,
+            )
+            unified_auth.add_provider(uid, provider_create)
+            logger.info(f"Added firebase_email provider for user {uid}")
+
+            return Response(
+                content=json.dumps({"uid": uid, "exists": True, "linked": True}),
+                status_code=200,
+            )
+        except Exception as e:
+            logger.error(f"Error linking accounts: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            db.rollback()
+            return Response(
+                content=json.dumps({"error": f"Failed to link accounts: {str(e)}"}),
+                status_code=400,
+            )
+
+    @staticmethod
+    def _handle_existing_user_github(
+        db: Session, uid: str, oauth_token: str, provider_data: list, provider_username: str
+    ) -> None:
+        """Handle GitHub provider for existing user."""
+        try:
+            unified_auth = UnifiedAuthService(db)
+            provider_info = (
+                provider_data[0] if isinstance(provider_data, list) else provider_data
+            )
+
+            existing_github = unified_auth.get_provider(uid, "firebase_github")
+            if not existing_github:
+                provider_create = AuthProviderCreate(
+                    provider_type="firebase_github",
+                    provider_uid=provider_username or uid,
+                    provider_data=provider_info,
+                    access_token=oauth_token,
+                    is_primary=False,
+                )
+                unified_auth.add_provider(uid, provider_create)
+                logger.info(f"Linked GitHub provider to existing user {uid}")
+            else:
+                all_providers = unified_auth.get_user_providers(uid)
+                has_other_providers = any(
+                    p.provider_type != "firebase_github" for p in all_providers
+                )
+
+                if not existing_github.is_primary and not has_other_providers:
+                    logger.info(
+                        f"User {uid} signed in with GitHub (only provider) - "
+                        "setting GitHub as primary provider"
+                    )
+                    unified_auth.set_primary_provider(uid, "firebase_github")
+                elif not existing_github.is_primary and has_other_providers:
+                    logger.info(
+                        f"User {uid} linking GitHub (has other providers) - "
+                        "keeping existing primary provider"
+                    )
+                unified_auth.update_last_used(uid, "firebase_github")
+        except Exception as e:
+            logger.warning(f"Failed to add GitHub provider for existing user: {str(e)}")
+
+    @staticmethod
+    def _handle_existing_user_email(db: Session, uid: str, email: str) -> None:
+        """Handle email provider for existing user."""
+        try:
+            unified_auth = UnifiedAuthService(db)
+            existing_email_provider = unified_auth.get_provider(uid, "firebase_email")
+            if not existing_email_provider:
+                provider_create = AuthProviderCreate(
+                    provider_type="firebase_email",
+                    provider_uid=uid,
+                    provider_data={"email": email, "uid": uid},
+                    access_token=None,
+                    is_primary=False,
+                )
+                unified_auth.add_provider(uid, provider_create)
+                logger.info(f"Added firebase_email provider for existing user {uid}")
+        except Exception as e:
+            logger.warning(f"Failed to add email provider for existing user: {str(e)}")
+
+    @staticmethod
+    def _link_after_duplicate_error(
+        db: Session, uid: str, email: str
+    ) -> Optional[Response]:
+        """Link accounts after duplicate email error during user creation."""
+        user_service = UserService(db)
+        user_by_email = user_service.get_user_by_email(email)
+        if not user_by_email:
+            return None
+
+        logger.info(
+            f"User creation failed due to duplicate email. Linking {uid} to existing user {user_by_email.uid}"
+        )
+        try:
+            user_by_email.uid = uid
+            db.commit()
+
+            unified_auth = UnifiedAuthService(db)
+            provider_create = AuthProviderCreate(
+                provider_type="firebase_email",
+                provider_uid=uid,
+                provider_data={"email": email, "uid": uid},
+                access_token=None,
+                is_primary=False,
+            )
+            unified_auth.add_provider(uid, provider_create)
+
+            return Response(
+                content=json.dumps({"uid": uid, "exists": True, "linked": True}),
+                status_code=200,
+            )
+        except Exception as e:
+            logger.error(
+                f"Error linking accounts after duplicate email error: {str(e)}"
+            )
+            db.rollback()
+            return None
+
+    @staticmethod
+    def _create_provider_info(
+        provider_data: list, oauth_token: str, uid: str, email: str
+    ) -> Dict[str, Any]:
+        """Create provider info dict for user creation."""
+        if provider_data and len(provider_data) > 0:
+            provider_info = (
+                provider_data[0] if isinstance(provider_data, list) else provider_data
+            )
+            if oauth_token:
+                provider_info["access_token"] = oauth_token
+            return provider_info
+        return {"providerId": "password", "uid": uid, "email": email}
+
+    @staticmethod
+    def _determine_user_email(
+        user_service: UserService, email: str, oauth_token: str, provider_data: list
+    ) -> str:
+        """Determine the correct email to use for new user creation."""
+        if oauth_token and provider_data and len(provider_data) > 0:
+            existing_user_by_email = user_service.get_user_by_email(email)
+            if existing_user_by_email:
+                logger.info(
+                    f"GitHub signup for existing email {email}. "
+                    f"Using existing user email: {existing_user_by_email.email}"
+                )
+                return existing_user_by_email.email
+        return email
+
+    @staticmethod
+    def _add_provider_for_new_user(
+        db: Session,
+        uid: str,
+        email: str,
+        oauth_token: str,
+        provider_data: list,
+        provider_username: str,
+    ) -> None:
+        """Add provider for new user in unified auth system."""
+        try:
+            unified_auth = UnifiedAuthService(db)
+
+            if oauth_token and provider_data and len(provider_data) > 0:
+                provider_type = "firebase_github"
+                provider_info_data = (
+                    provider_data[0] if isinstance(provider_data, list) else provider_data
+                )
+                provider_uid = provider_username or uid
+            else:
+                provider_type = "firebase_email"
+                provider_info_data = {"email": email, "uid": uid}
+                provider_uid = uid
+
+            provider_create = AuthProviderCreate(
+                provider_type=provider_type,
+                provider_uid=provider_uid,
+                provider_data=provider_info_data,
+                access_token=oauth_token if oauth_token else None,
+                is_primary=True,
+            )
+            unified_auth.add_provider(uid, provider_create)
+            logger.info(f"Added {provider_type} provider for new user {uid}")
+        except Exception as e:
+            logger.warning(f"Failed to add provider for new user: {str(e)}")
+            logger.warning(f"Traceback: {traceback.format_exc()}")
+
     @auth_router.post("/login")
     async def login(login_request: LoginRequest):
         email, password = login_request.email, login_request.password
@@ -102,49 +310,9 @@ class AuthAPI:
 
             # If user exists by email but not by UID, we need to link accounts
             if user_by_email and user_by_email.uid != uid:
-                logger.info(
-                    f"Email {email} exists with different UID. Linking accounts: {user_by_email.uid} -> {uid}"
+                return await AuthAPI._link_accounts_by_email(
+                    db, user_by_email, uid, email
                 )
-                existing_uid = user_by_email.uid
-
-                # Update the existing user's UID to match the new Firebase UID
-                # This links the SSO account with the email/password account
-                try:
-                    # Update user UID in database
-                    user_by_email.uid = uid
-                    db.commit()
-                    logger.info(
-                        f"Updated user UID from {existing_uid} to {uid} for email {email}"
-                    )
-
-                    # Add email/password provider to the unified auth system
-                    unified_auth = UnifiedAuthService(db)
-                    provider_create = AuthProviderCreate(
-                        provider_type="firebase_email",
-                        provider_uid=uid,
-                        provider_data={"email": email, "uid": uid},
-                        access_token=None,
-                        is_primary=False,  # Keep SSO as primary if it exists
-                    )
-                    unified_auth.add_provider(uid, provider_create)
-                    logger.info(f"Added firebase_email provider for user {uid}")
-
-                    return Response(
-                        content=json.dumps(
-                            {"uid": uid, "exists": True, "linked": True}
-                        ),
-                        status_code=200,
-                    )
-                except Exception as e:
-                    logger.error(f"Error linking accounts: {str(e)}")
-                    logger.error(f"Traceback: {traceback.format_exc()}")
-                    db.rollback()
-                    return Response(
-                        content=json.dumps(
-                            {"error": f"Failed to link accounts: {str(e)}"}
-                        ),
-                        status_code=400,
-                    )
 
             if user:
                 # Existing user - DO NOT update email if it's different (preserve primary sign-in email)
@@ -163,88 +331,13 @@ class AuthAPI:
 
                 # Also add GitHub as a provider in the new system if it's a GitHub signup
                 if oauth_token and provider_data and len(provider_data) > 0:
-                    try:
-                        unified_auth = UnifiedAuthService(db)
-                        provider_info = (
-                            provider_data[0]
-                            if isinstance(provider_data, list)
-                            else provider_data
-                        )
-
-                        # Check if GitHub provider already exists
-                        existing_github = unified_auth.get_provider(
-                            uid, "firebase_github"
-                        )
-                        if not existing_github:
-                            # Add GitHub as a provider
-                            provider_create = AuthProviderCreate(
-                                provider_type="firebase_github",
-                                provider_uid=provider_username or uid,
-                                provider_data=provider_info,
-                                access_token=oauth_token,
-                                is_primary=False,  # Don't make it primary automatically for existing users
-                            )
-                            unified_auth.add_provider(uid, provider_create)
-                            logger.info(
-                                f"Linked GitHub provider to existing user {uid}"
-                            )
-                        else:
-                            # User already has GitHub provider
-                            # Check if user has other providers - if yes, this is likely a link operation, not a sign-in
-                            # Only set GitHub as primary if it's the only provider (user signed up with GitHub)
-                            all_providers = unified_auth.get_user_providers(uid)
-                            has_other_providers = any(
-                                p.provider_type != "firebase_github"
-                                for p in all_providers
-                            )
-
-                            if (
-                                not existing_github.is_primary
-                                and not has_other_providers
-                            ):
-                                # User only has GitHub - this is a GitHub sign-in, set as primary
-                                logger.info(
-                                    f"User {uid} signed in with GitHub (only provider) - setting GitHub as primary provider"
-                                )
-                                unified_auth.set_primary_provider(
-                                    uid, "firebase_github"
-                                )
-                            elif not existing_github.is_primary and has_other_providers:
-                                # User has other providers - this is a link operation, don't change primary
-                                logger.info(
-                                    f"User {uid} linking GitHub (has other providers) - keeping existing primary provider"
-                                )
-                            # Update last used
-                            unified_auth.update_last_used(uid, "firebase_github")
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to add GitHub provider for existing user: {str(e)}"
-                        )
-                        # Continue - the old system still works
+                    AuthAPI._handle_existing_user_github(
+                        db, uid, oauth_token, provider_data, provider_username
+                    )
 
                 # Also add email/password provider if it doesn't exist
                 if not oauth_token:
-                    try:
-                        unified_auth = UnifiedAuthService(db)
-                        existing_email_provider = unified_auth.get_provider(
-                            uid, "firebase_email"
-                        )
-                        if not existing_email_provider:
-                            provider_create = AuthProviderCreate(
-                                provider_type="firebase_email",
-                                provider_uid=uid,
-                                provider_data={"email": email, "uid": uid},
-                                access_token=None,
-                                is_primary=False,
-                            )
-                            unified_auth.add_provider(uid, provider_create)
-                            logger.info(
-                                f"Added firebase_email provider for existing user {uid}"
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to add email provider for existing user: {str(e)}"
-                        )
+                    AuthAPI._handle_existing_user_email(db, uid, email)
 
                 return Response(
                     content=json.dumps({"uid": uid, "exists": True}),
@@ -268,40 +361,16 @@ class AuthAPI:
 
                 # New user - create user
                 first_login = datetime.now(timezone.utc)
-
-                # Handle provider info for both GitHub OAuth and email/password
-                if provider_data and len(provider_data) > 0:
-                    provider_info = (
-                        provider_data[0]
-                        if isinstance(provider_data, list)
-                        else provider_data
-                    )
-                    if oauth_token:
-                        provider_info["access_token"] = oauth_token
-                else:
-                    # Email/password signup - create minimal provider info
-                    provider_info = {
-                        "providerId": "password",
-                        "uid": uid,
-                        "email": email,
-                    }
-
-                # For new users, use the email from the request
-                # But if this is a GitHub signup and user exists by email, use existing email
-                user_email = email
-                if oauth_token and provider_data and len(provider_data) > 0:
-                    # This is a GitHub signup - check if user exists by email
-                    existing_user_by_email = user_service.get_user_by_email(email)
-                    if existing_user_by_email:
-                        # User exists - use their existing email (primary sign-in email)
-                        user_email = existing_user_by_email.email
-                        logger.info(
-                            f"GitHub signup for existing email {email}. Using existing user email: {user_email}"
-                        )
+                provider_info = AuthAPI._create_provider_info(
+                    provider_data, oauth_token, uid, email
+                )
+                user_email = AuthAPI._determine_user_email(
+                    user_service, email, oauth_token, provider_data
+                )
 
                 user = CreateUser(
                     uid=uid,
-                    email=user_email,  # Use existing email if user already exists
+                    email=user_email,
                     display_name=body.get("displayName", user_email.split("@")[0]),
                     email_verified=body.get("emailVerified", False),
                     created_at=first_login,
@@ -316,73 +385,14 @@ class AuthAPI:
                     "duplicate" in message.lower()
                     or "already exists" in message.lower()
                 ):
-                    # Email already exists - try to link accounts
-                    user_by_email = user_service.get_user_by_email(email)
-                    if user_by_email:
-                        logger.info(
-                            f"User creation failed due to duplicate email. Linking {uid} to existing user {user_by_email.uid}"
-                        )
-                        # Update existing user's UID to match new Firebase UID
-                        try:
-                            user_by_email.uid = uid
-                            db.commit()
-
-                            # Add email/password provider
-                            unified_auth = UnifiedAuthService(db)
-                            provider_create = AuthProviderCreate(
-                                provider_type="firebase_email",
-                                provider_uid=uid,
-                                provider_data={"email": email, "uid": uid},
-                                access_token=None,
-                                is_primary=False,
-                            )
-                            unified_auth.add_provider(uid, provider_create)
-
-                            return Response(
-                                content=json.dumps(
-                                    {"uid": uid, "exists": True, "linked": True}
-                                ),
-                                status_code=200,
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"Error linking accounts after duplicate email error: {str(e)}"
-                            )
-                            db.rollback()
+                    link_response = AuthAPI._link_after_duplicate_error(db, uid, email)
+                    if link_response:
+                        return link_response
 
                 # Also add provider in the new system
-                try:
-                    unified_auth = UnifiedAuthService(db)
-
-                    # Determine provider type
-                    if oauth_token and provider_data and len(provider_data) > 0:
-                        # GitHub OAuth signup
-                        provider_type = "firebase_github"
-                        provider_info_data = (
-                            provider_data[0]
-                            if isinstance(provider_data, list)
-                            else provider_data
-                        )
-                        provider_uid = provider_username or uid
-                    else:
-                        # Email/password signup - use firebase_email provider type
-                        provider_type = "firebase_email"
-                        provider_info_data = {"email": email, "uid": uid}
-                        provider_uid = uid
-
-                    provider_create = AuthProviderCreate(
-                        provider_type=provider_type,
-                        provider_uid=provider_uid,
-                        provider_data=provider_info_data,
-                        access_token=oauth_token if oauth_token else None,
-                        is_primary=True,  # First provider is primary
-                    )
-                    unified_auth.add_provider(uid, provider_create)
-                    logger.info(f"Added {provider_type} provider for new user {uid}")
-                except Exception as e:
-                    logger.warning(f"Failed to add provider for new user: {str(e)}")
-                    logger.warning(f"Traceback: {traceback.format_exc()}")
-                    # Continue - the old system still works
+                AuthAPI._add_provider_for_new_user(
+                    db, uid, email, oauth_token, provider_data, provider_username
+                )
 
                 await send_slack_message(
                     f"New signup: {email} ({body.get('displayName', 'N/A')})"
