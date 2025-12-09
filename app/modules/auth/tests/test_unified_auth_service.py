@@ -3,7 +3,7 @@ Unit tests for UnifiedAuthService
 """
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch, AsyncMock
 
 from app.modules.auth.unified_auth_service import UnifiedAuthService
@@ -294,7 +294,7 @@ class TestUnifiedAuthService:
             provider_uid="google-789",
             provider_data={},
             token="expired-token",
-            expires_at=datetime.utcnow() - timedelta(minutes=1),  # Already expired
+            expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),  # Already expired
         )
         db_session.add(expired_link)
         db_session.commit()
