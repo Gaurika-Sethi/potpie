@@ -12,10 +12,12 @@ from typing import Optional, Dict, Any, List, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 
+
 # Use timezone-aware datetime.now() instead of deprecated utcnow()
 def utc_now() -> datetime:
     """Get current UTC time as timezone-aware datetime"""
     return datetime.now(timezone.utc)
+
 
 from app.modules.auth.sso_providers import (
     GoogleSSOProvider,

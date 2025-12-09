@@ -449,7 +449,9 @@ class AuthAPI:
             if not provider:
                 logger.error(f"Unsupported SSO provider: {sso_request.sso_provider}")
                 return JSONResponse(
-                    content={"error": f"Unsupported SSO provider: {sso_request.sso_provider}"},
+                    content={
+                        "error": f"Unsupported SSO provider: {sso_request.sso_provider}"
+                    },
                     status_code=400,
                 )
 
@@ -459,7 +461,9 @@ class AuthAPI:
                     sso_request.sso_provider, sso_request.id_token
                 )
                 if not user_info:
-                    logger.error(f"Token verification failed for {sso_request.sso_provider}")
+                    logger.error(
+                        f"Token verification failed for {sso_request.sso_provider}"
+                    )
                     return JSONResponse(
                         content={"error": "Invalid or expired ID token"},
                         status_code=401,
@@ -497,7 +501,9 @@ class AuthAPI:
                     status_code=401,
                 )
             except Exception as e:
-                logger.error(f"Unexpected error verifying token: {str(e)}", exc_info=True)
+                logger.error(
+                    f"Unexpected error verifying token: {str(e)}", exc_info=True
+                )
                 return JSONResponse(
                     content={"error": "Token verification failed"},
                     status_code=500,
