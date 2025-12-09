@@ -75,8 +75,10 @@ class AzureSSOProvider(BaseSSOProvider):
         try:
             # Get signing keys from Azure
             jwks_url = self.AZURE_JWKS_URL.format(tenant=self.tenant_id)
-            # Use secure TLS defaults (Python 3.10+ uses secure defaults)
+            # Use secure TLS defaults with explicit minimum protocol version
             ssl_context = ssl.create_default_context()
+            # Explicitly set minimum TLS version for security
+            ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
             async with httpx.AsyncClient(verify=ssl_context) as client:
                 try:
                     jwks_response = await client.get(jwks_url, timeout=10.0)

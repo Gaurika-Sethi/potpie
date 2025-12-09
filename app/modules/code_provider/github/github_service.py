@@ -181,6 +181,120 @@ class GithubService:
 
         return encoding
 
+    def _get_github_token_from_provider(self, uid: str) -> Optional[str]:
+        """Get GitHub token from new multi-provider system for given UID."""
+        try:
+            from app.modules.auth.auth_provider_model import UserAuthProvider
+
+            github_provider = (
+                self.db.query(UserAuthProvider)
+                .filter(
+                    UserAuthProvider.user_id == uid,
+                    UserAuthProvider.provider_type == "firebase_github",
+                )
+                .first()
+            )
+            if github_provider and github_provider.access_token:
+                logger.info(f"Found GitHub token in UserAuthProvider for user {uid}")
+                return github_provider.access_token
+            elif github_provider:
+                logger.warning(
+                    f"GitHub provider exists for user {uid} but has no access_token"
+                )
+        except Exception as e:
+            logger.warning(f"Error checking UserAuthProvider: {str(e)}")
+        return None
+
+    def _get_github_token_from_legacy_provider_info(
+        self, user: User, uid: str
+    ) -> Optional[str]:
+        """Get GitHub token from legacy provider_info system."""
+        if user.provider_info is not None and isinstance(user.provider_info, dict):
+            access_token = user.provider_info.get("access_token")
+            if access_token:
+                logger.debug(f"Found GitHub token in provider_info for user {uid}")
+                return access_token
+        return None
+
+    def _copy_github_provider_to_user(
+        self, uid: str, github_provider: any, other_user_uid: str
+    ) -> Optional[str]:
+        """Copy GitHub provider from another user to current user."""
+        try:
+            from app.modules.auth.auth_schema import AuthProviderCreate
+            from app.modules.auth.unified_auth_service import UnifiedAuthService
+
+            unified_auth = UnifiedAuthService(self.db)
+            provider_create = AuthProviderCreate(
+                provider_type="firebase_github",
+                provider_uid=github_provider.provider_uid,
+                provider_data=github_provider.provider_data,
+                access_token=github_provider.access_token,
+                refresh_token=github_provider.refresh_token,
+                token_expires_at=github_provider.token_expires_at,
+                is_primary=False,  # Don't make it primary automatically
+            )
+            unified_auth.add_provider(uid, provider_create)
+            logger.info(f"Copied GitHub provider from {other_user_uid} to {uid}")
+            return github_provider.access_token
+        except Exception as e:
+            logger.warning(f"Failed to copy GitHub provider: {str(e)}")
+            # Still return the token even if copying failed
+            return github_provider.access_token
+
+    def _get_github_token_from_other_users(
+        self, user: User, uid: str
+    ) -> Optional[str]:
+        """Check other users with same email for GitHub token."""
+        if not user.email:
+            return None
+
+        try:
+            from app.modules.auth.auth_provider_model import UserAuthProvider
+
+            # Find all users with the same email
+            users_with_same_email = (
+                self.db.query(User).filter(User.email == user.email).all()
+            )
+
+            for other_user in users_with_same_email:
+                if other_user.uid == uid:
+                    continue  # Skip current user
+
+                # Check if this other user has GitHub provider
+                github_provider = (
+                    self.db.query(UserAuthProvider)
+                    .filter(
+                        UserAuthProvider.user_id == other_user.uid,
+                        UserAuthProvider.provider_type == "firebase_github",
+                    )
+                    .first()
+                )
+                if github_provider and github_provider.access_token:
+                    logger.info(
+                        f"Found GitHub token for user {other_user.uid} "
+                        f"(same email as {uid}). Using it."
+                    )
+                    return self._copy_github_provider_to_user(
+                        uid, github_provider, other_user.uid
+                    )
+
+                # Also check legacy provider_info for other users
+                if other_user.provider_info and isinstance(
+                    other_user.provider_info, dict
+                ):
+                    other_access_token = other_user.provider_info.get("access_token")
+                    if other_access_token:
+                        logger.info(
+                            f"Found GitHub token in provider_info for user "
+                            f"{other_user.uid} (same email as {uid}). Using it."
+                        )
+                        return other_access_token
+        except Exception as e:
+            logger.debug(f"Error checking other users with same email: {str(e)}")
+
+        return None
+
     def get_github_oauth_token(self, uid: str) -> Optional[str]:
         """
         Get user's GitHub OAuth token.
@@ -203,106 +317,23 @@ class GithubService:
             raise HTTPException(status_code=404, detail="User not found")
 
         # First, try the new multi-provider system for this UID
-        try:
-            from app.modules.auth.auth_provider_model import UserAuthProvider
-
-            github_provider = (
-                self.db.query(UserAuthProvider)
-                .filter(
-                    UserAuthProvider.user_id == uid,
-                    UserAuthProvider.provider_type == "firebase_github",
-                )
-                .first()
-            )
-            if github_provider and github_provider.access_token:
-                logger.info(f"Found GitHub token in UserAuthProvider for user {uid}")
-                return github_provider.access_token
-            elif github_provider:
-                logger.warning(
-                    f"GitHub provider exists for user {uid} but has no access_token"
-                )
-        except Exception as e:
-            logger.warning(f"Error checking UserAuthProvider: {str(e)}")
+        token = self._get_github_token_from_provider(uid)
+        if token:
+            return token
 
         # Fallback to legacy provider_info system for this UID
-        if user.provider_info is not None and isinstance(user.provider_info, dict):
-            access_token = user.provider_info.get("access_token")
-            if access_token:
-                logger.debug(f"Found GitHub token in provider_info for user {uid}")
-                return access_token
+        token = self._get_github_token_from_legacy_provider_info(user, uid)
+        if token:
+            return token
 
         # If no GitHub found for current UID, check if there's another user with same email that has GitHub
-        # This handles the case where user signed up with email/password + GitHub, then linked SSO
-        if user.email:
-            try:
-                from app.modules.auth.auth_provider_model import UserAuthProvider
-
-                # Find all users with the same email
-                users_with_same_email = (
-                    self.db.query(User).filter(User.email == user.email).all()
-                )
-
-                for other_user in users_with_same_email:
-                    if other_user.uid == uid:
-                        continue  # Skip current user
-
-                    # Check if this other user has GitHub provider
-                    github_provider = (
-                        self.db.query(UserAuthProvider)
-                        .filter(
-                            UserAuthProvider.user_id == other_user.uid,
-                            UserAuthProvider.provider_type == "firebase_github",
-                        )
-                        .first()
-                    )
-                    if github_provider and github_provider.access_token:
-                        logger.info(
-                            f"Found GitHub token for user {other_user.uid} (same email as {uid}). Using it."
-                        )
-                        # Copy the GitHub provider to the current user's account
-                        try:
-                            from app.modules.auth.auth_schema import AuthProviderCreate
-                            from app.modules.auth.unified_auth_service import (
-                                UnifiedAuthService,
-                            )
-
-                            unified_auth = UnifiedAuthService(self.db)
-                            provider_create = AuthProviderCreate(
-                                provider_type="firebase_github",
-                                provider_uid=github_provider.provider_uid,
-                                provider_data=github_provider.provider_data,
-                                access_token=github_provider.access_token,
-                                refresh_token=github_provider.refresh_token,
-                                token_expires_at=github_provider.token_expires_at,
-                                is_primary=False,  # Don't make it primary automatically
-                            )
-                            unified_auth.add_provider(uid, provider_create)
-                            logger.info(
-                                f"Copied GitHub provider from {other_user.uid} to {uid}"
-                            )
-                            return github_provider.access_token
-                        except Exception as e:
-                            logger.warning(f"Failed to copy GitHub provider: {str(e)}")
-                            # Still return the token even if copying failed
-                            return github_provider.access_token
-
-                    # Also check legacy provider_info for other users
-                    if other_user.provider_info and isinstance(
-                        other_user.provider_info, dict
-                    ):
-                        other_access_token = other_user.provider_info.get(
-                            "access_token"
-                        )
-                        if other_access_token:
-                            logger.info(
-                                f"Found GitHub token in provider_info for user {other_user.uid} (same email as {uid}). Using it."
-                            )
-                            return other_access_token
-            except Exception as e:
-                logger.debug(f"Error checking other users with same email: {str(e)}")
+        token = self._get_github_token_from_other_users(user, uid)
+        if token:
+            return token
 
         logger.warning(
-            f"User {uid} (email: {user.email}) has no GitHub token in any system. User needs to link GitHub account."
+            f"User {uid} (email: {user.email}) has no GitHub token in any system. "
+            "User needs to link GitHub account."
         )
         return None
 

@@ -316,7 +316,7 @@ class AuthAPI:
                     "Firebase Admin not initialized. Cannot create custom token."
                 )
                 logger.error("Make sure Firebase is initialized in app startup")
-                raise Exception("Firebase Admin not initialized")
+                raise RuntimeError("Firebase Admin not initialized")
 
             # Create or get Firebase user
             try:
@@ -808,6 +808,7 @@ class AuthAPI:
 
     @auth_router.post("/providers/confirm-linking")
     async def confirm_provider_linking(
+        self,
         confirm_request: ConfirmLinkingRequest,
         db: Session = Depends(get_db),
     ):
@@ -904,6 +905,7 @@ class AuthAPI:
 
     @auth_router.get("/providers/me")
     async def get_my_providers(
+        self,
         request: Request,
         db: Session = Depends(get_db),
         credential: HTTPAuthorizationCredentials = Depends(
@@ -952,6 +954,7 @@ class AuthAPI:
 
     @auth_router.post("/providers/set-primary")
     async def set_primary_provider(
+        self,
         request: Request,
         primary_request: SetPrimaryProviderRequest,
         db: Session = Depends(get_db),
@@ -997,6 +1000,7 @@ class AuthAPI:
 
     @auth_router.delete("/providers/unlink")
     async def unlink_provider(
+        self,
         request: Request,
         unlink_request: UnlinkProviderRequest,
         db: Session = Depends(get_db),
@@ -1051,6 +1055,7 @@ class AuthAPI:
 
     @auth_router.get("/account/check-email")
     async def check_email_providers(
+        self,
         email: str,
         db: Session = Depends(get_db),
     ):
@@ -1091,6 +1096,7 @@ class AuthAPI:
 
     @auth_router.get("/account/me")
     async def get_my_account(
+        self,
         request: Request,
         db: Session = Depends(get_db),
         credential: HTTPAuthorizationCredentials = Depends(

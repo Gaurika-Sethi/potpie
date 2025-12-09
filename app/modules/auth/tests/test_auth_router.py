@@ -62,7 +62,6 @@ class TestSSOLoginEndpoint:
         )
 
         assert response.status_code in [200, 202]
-        data = response.json()
         # Should be "needs_linking" since user has GitHub but not Google
 
     @pytest.mark.skip("Requires full FastAPI app setup")
