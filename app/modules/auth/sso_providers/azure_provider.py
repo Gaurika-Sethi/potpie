@@ -7,7 +7,7 @@ Handles Microsoft 365 and Azure AD authentication.
 import os
 import logging
 import jwt
-import requests
+import httpx
 from typing import Dict, Any, Optional
 from urllib.parse import urlencode
 
@@ -74,60 +74,69 @@ class AzureSSOProvider(BaseSSOProvider):
         try:
             # Get signing keys from Azure
             jwks_url = self.AZURE_JWKS_URL.format(tenant=self.tenant_id)
-            jwks_response = requests.get(jwks_url, timeout=10)
-            jwks_response.raise_for_status()
-            jwks = jwks_response.json()
+            async with httpx.AsyncClient() as client:
+                try:
+                    jwks_response = await client.get(jwks_url, timeout=10.0)
+                    jwks_response.raise_for_status()
+                    jwks = jwks_response.json()
+                except httpx.HTTPError as e:
+                    logger.error(f"Failed to fetch Azure JWKS: {str(e)}")
+                    raise ValueError(f"Failed to fetch signing keys from Azure: {str(e)}")
 
-            # Decode token header to get key ID
-            unverified_header = jwt.get_unverified_header(id_token_str)
-            kid = unverified_header.get("kid")
+                # Decode token header to get key ID
+                unverified_header = jwt.get_unverified_header(id_token_str)
+                kid = unverified_header.get("kid")
 
-            # Find the matching key
-            signing_key = None
-            for key in jwks.get("keys", []):
-                if key.get("kid") == kid:
-                    try:
-                        signing_key = jwt.PyJWK(key)
-                        break
-                    except Exception as e:
-                        logger.warning(f"Failed to create PyJWK from key: {str(e)}")
-                        continue
+                # Find the matching key
+                signing_key = None
+                for key in jwks.get("keys", []):
+                    if key.get("kid") == kid:
+                        try:
+                            signing_key = jwt.PyJWK(key)
+                            break
+                        except Exception as e:
+                            logger.warning(f"Failed to create PyJWK from key: {str(e)}")
+                            continue
 
-            if not signing_key:
-                raise ValueError(f"Unable to find matching signing key for kid: {kid}")
+                if not signing_key:
+                    raise ValueError(f"Unable to find matching signing key for kid: {kid}")
 
-            # Verify and decode token
-            payload = jwt.decode(
-                id_token_str,
-                signing_key.key,
-                algorithms=["RS256"],
-                audience=self.client_id,
-                options={
-                    "verify_signature": True,
-                    "verify_exp": True,
-                    "verify_aud": True,
-                },
-            )
+                # Verify and decode token
+                payload = jwt.decode(
+                    id_token_str,
+                    signing_key.key,
+                    algorithms=["RS256"],
+                    audience=self.client_id,
+                    options={
+                        "verify_signature": True,
+                        "verify_exp": True,
+                        "verify_aud": True,
+                    },
+                )
 
-            # Verify issuer
-            expected_issuer = f"https://login.microsoftonline.com/{self.tenant_id}/v2.0"
-            if payload.get("iss") != expected_issuer and self.tenant_id != "common":
-                # For 'common' tenant, issuer will vary by actual tenant
-                logger.warning(f"Unexpected issuer: {payload.get('iss')}")
+                # Verify issuer
+                expected_issuer = (
+                    f"https://login.microsoftonline.com/{self.tenant_id}/v2.0"
+                )
+                if payload.get("iss") != expected_issuer and self.tenant_id != "common":
+                    # For 'common' tenant, issuer will vary by actual tenant
+                    logger.warning(f"Unexpected issuer: {payload.get('iss')}")
 
-            # Extract user info
-            user_info = SSOUserInfo(
-                email=payload.get("email") or payload.get("preferred_username"),
-                email_verified=True,  # Azure AD always verifies email
-                provider_uid=payload["oid"],  # Object ID
-                display_name=payload.get("name"),
-                given_name=payload.get("given_name"),
-                family_name=payload.get("family_name"),
-                raw_data=payload,
-            )
+                # Extract user info
+                user_info = SSOUserInfo(
+                    email=payload.get("email") or payload.get("preferred_username"),
+                    email_verified=True,  # Azure AD always verifies email
+                    provider_uid=payload["oid"],  # Object ID
+                    display_name=payload.get("name"),
+                    given_name=payload.get("given_name"),
+                    family_name=payload.get("family_name"),
+                    raw_data=payload,
+                )
 
-            logger.info(f"Successfully verified Azure AD token for {user_info.email}")
-            return user_info
+                logger.info(
+                    f"Successfully verified Azure AD token for {user_info.email}"
+                )
+                return user_info
 
         except jwt.ExpiredSignatureError:
             logger.error("Azure AD token has expired")

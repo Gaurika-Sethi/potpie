@@ -4,7 +4,7 @@ import os
 import traceback
 from datetime import datetime, timezone
 
-import requests
+import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, Request
 from fastapi.responses import JSONResponse, Response
@@ -43,7 +43,11 @@ load_dotenv(override=True)
 async def send_slack_message(message: str):
     payload = {"text": message}
     if SLACK_WEBHOOK_URL:
-        requests.post(SLACK_WEBHOOK_URL, json=payload)
+        async with httpx.AsyncClient() as client:
+            try:
+                await client.post(SLACK_WEBHOOK_URL, json=payload, timeout=10.0)
+            except Exception as e:
+                logger.warning(f"Failed to send Slack message: {str(e)}")
 
 
 class AuthAPI:
