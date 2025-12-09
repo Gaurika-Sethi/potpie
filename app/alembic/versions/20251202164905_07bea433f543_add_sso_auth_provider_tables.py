@@ -11,6 +11,9 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
+# Constants
+USERS_UID_FOREIGN_KEY = "users.uid"
+
 # revision identifiers, used by Alembic.
 revision: str = '20251202164905_07bea433f543'
 down_revision: Union[str, None] = '20250928_simple_global_cache'
@@ -31,7 +34,7 @@ def upgrade() -> None:
     sa.Column('error_message', sa.Text(), nullable=True),
     sa.Column('created_at', sa.TIMESTAMP(timezone=True), nullable=False),
     sa.Column('extra_data', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-    sa.ForeignKeyConstraint(['user_id'], ['users.uid'], ondelete='SET NULL'),
+    sa.ForeignKeyConstraint(['user_id'], [USERS_UID_FOREIGN_KEY], ondelete='SET NULL'),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_table('organization_sso_config',
@@ -45,7 +48,7 @@ def upgrade() -> None:
     sa.Column('configured_by', sa.String(length=255), nullable=True),
     sa.Column('configured_at', sa.TIMESTAMP(timezone=True), nullable=False),
     sa.Column('is_active', sa.Boolean(), nullable=True),
-    sa.ForeignKeyConstraint(['configured_by'], ['users.uid'], ),
+    sa.ForeignKeyConstraint(['configured_by'], [USERS_UID_FOREIGN_KEY]),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('domain')
     )
@@ -60,7 +63,7 @@ def upgrade() -> None:
     sa.Column('created_at', sa.TIMESTAMP(timezone=True), nullable=False),
     sa.Column('ip_address', sa.String(length=45), nullable=True),
     sa.Column('user_agent', sa.Text(), nullable=True),
-    sa.ForeignKeyConstraint(['user_id'], ['users.uid'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['user_id'], [USERS_UID_FOREIGN_KEY], ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('token')
     )
@@ -78,7 +81,7 @@ def upgrade() -> None:
     sa.Column('last_used_at', sa.TIMESTAMP(timezone=True), nullable=True),
     sa.Column('linked_by_ip', sa.String(length=45), nullable=True),
     sa.Column('linked_by_user_agent', sa.Text(), nullable=True),
-    sa.ForeignKeyConstraint(['user_id'], ['users.uid'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['user_id'], [USERS_UID_FOREIGN_KEY], ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('provider_type', 'provider_uid', name='unique_provider_uid'),
     sa.UniqueConstraint('user_id', 'provider_type', name='unique_user_provider')
