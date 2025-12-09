@@ -21,6 +21,9 @@ from sqlalchemy.orm import relationship
 
 from app.core.base_model import Base
 
+# Constants
+USERS_UID_FOREIGN_KEY = "users.uid"
+
 
 class UserAuthProvider(Base):
     """
@@ -40,7 +43,7 @@ class UserAuthProvider(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(
         String(255),
-        ForeignKey("users.uid", ondelete="CASCADE"),
+        ForeignKey(USERS_UID_FOREIGN_KEY, ondelete="CASCADE"),
         nullable=False,
     )
 
@@ -98,7 +101,7 @@ class PendingProviderLink(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(
         String(255),
-        ForeignKey("users.uid", ondelete="CASCADE"),
+        ForeignKey(USERS_UID_FOREIGN_KEY, ondelete="CASCADE"),
         nullable=False,
     )
 
@@ -150,7 +153,7 @@ class OrganizationSSOConfig(Base):
     )  # Allow GitHub, etc. alongside SSO
 
     # Metadata
-    configured_by = Column(String(255), ForeignKey("users.uid"))
+    configured_by = Column(String(255), ForeignKey(USERS_UID_FOREIGN_KEY))
     configured_at = Column(TIMESTAMP(timezone=True), default=func.now(), nullable=False)
     is_active = Column(Boolean, default=True)
 
@@ -177,7 +180,9 @@ class AuthAuditLog(Base):
     __tablename__ = "auth_audit_log"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(String(255), ForeignKey("users.uid", ondelete="SET NULL"))
+    user_id = Column(
+        String(255), ForeignKey(USERS_UID_FOREIGN_KEY, ondelete="SET NULL")
+    )
 
     # Event details
     event_type = Column(
