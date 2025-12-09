@@ -242,9 +242,7 @@ class GithubService:
             # Still return the token even if copying failed
             return github_provider.access_token
 
-    def _get_github_token_from_other_users(
-        self, user: User, uid: str
-    ) -> Optional[str]:
+    def _get_github_token_from_other_users(self, user: User, uid: str) -> Optional[str]:
         """Check other users with same email for GitHub token."""
         if not user.email:
             return None
